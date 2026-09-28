@@ -11,13 +11,19 @@
  *
  * The game itself is replicated by *lockstep*: the host broadcasts each
  * accepted move, and every client applies it to its own copy of the
- * deterministic engine (same seed ⇒ same collapses). A state fingerprint
- * rides along with every move so any divergence is caught immediately.
+ * deterministic engine (same dice values ⇒ same collapses). A state
+ * fingerprint rides along with every move so any divergence is caught.
+ * Dice come from per-move hash-chain reveals by both players (fair-seed.ts).
  */
 
 import type { GameResult, Level, Move, RuleSet } from '../engine/index.ts';
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * Bump whenever messages OR engine behaviour change: two clients must run
+ * identical rules for lockstep to work, so mismatched versions are refused
+ * with a "reload the page" message instead of drifting apart.
+ */
+export const PROTOCOL_VERSION = 2;
 
 export type Seat = 'X' | 'O';
 
@@ -41,6 +47,16 @@ export interface MemberInfo {
 
 export type GamePhase = 'seeding' | 'playing' | 'over';
 
+/** One accepted move, with everything needed to replay and verify it. */
+export interface MoveRecord {
+  move: Move;
+  by: Seat;
+  /** Both players' hash-chain values for this move, or null if it rolled no dice. */
+  dice: Record<Seat, string> | null;
+  /** State fingerprint after the move (QState.hash). */
+  hash: string;
+}
+
 export interface GameInfo {
   id: string;
   rules: RuleSet;
@@ -48,11 +64,11 @@ export interface GameInfo {
   seats: Record<Seat, string>;
   names: Record<Seat, string>;
   phase: GamePhase;
-  commits: Partial<Record<Seat, string>>;
-  /** Revealed nonces (after both commits) — lets everyone verify the seed. */
-  nonces: Partial<Record<Seat, string>>;
-  seed: string | null;
-  moves: Move[];
+  /** Each player's hash-chain anchor (their commitment to all future dice). */
+  anchors: Partial<Record<Seat, string>>;
+  moves: MoveRecord[];
+  /** A move waiting for the other player's dice value. */
+  pending: { ply: number; move: Move; by: Seat } | null;
   /** Set when the game ends outside the engine (resignation, abandonment). */
   forcedResult: GameResult | null;
   rematch: Record<Seat, boolean>;
@@ -76,9 +92,12 @@ export type ClientMsg =
   | { t: 'sit'; seat: Seat | null }
   | { t: 'settings'; settings: Partial<RoomSettings> }
   | { t: 'start' }
-  | { t: 'commit'; gameId: string; hash: string }
-  | { t: 'reveal'; gameId: string; nonce: string }
-  | { t: 'move'; gameId: string; ply: number; move: Move }
+  /** My hash-chain anchor for this game. */
+  | { t: 'commit'; gameId: string; anchor: string }
+  /** My chain value for move `ply` (only after the host showed me that move). */
+  | { t: 'reveal'; gameId: string; ply: number; value: string }
+  /** `reveal` is my chain value for this move number. */
+  | { t: 'move'; gameId: string; ply: number; move: Move; reveal: string }
   | { t: 'resign'; gameId: string }
   | { t: 'rematch'; gameId: string; want: boolean }
   | { t: 'chat'; text: string }
@@ -91,10 +110,12 @@ export type ClientMsg =
 export type HostMsg =
   | { t: 'welcome'; you: string; token: string; room: RoomSnapshot }
   | { t: 'room'; room: RoomSnapshot }
+  /** Please commit to a hash chain for this game. */
   | { t: 'seed-request'; gameId: string }
-  | { t: 'reveal-request'; gameId: string }
+  /** `by` played `move` as move number `ply`, and it rolls dice: send your value. */
+  | { t: 'reveal-request'; gameId: string; ply: number; move: Move; by: Seat }
   | { t: 'game-start'; game: GameInfo }
-  | { t: 'moved'; gameId: string; ply: number; move: Move; by: Seat; hash: string }
+  | { t: 'moved'; gameId: string; ply: number; move: Move; by: Seat; hash: string; dice: Record<Seat, string> | null }
   | { t: 'game-over'; gameId: string; result: GameResult }
   | { t: 'chat'; from: string; name: string; text: string; at: number }
   | { t: 'emote'; from: string; name: string; emote: string }
@@ -137,11 +158,41 @@ export function makeRoomCode(len = 5): string {
 /** Upper-case and strip spaces/dashes from a typed room code. */
 export const normalizeCode = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
 
+/**
+ * Invisible troublemakers: control characters, zero-width spaces and
+ * bidirectional overrides (which can make "Alice" look like someone else, or
+ * flip the text that follows). Zero-width (non-)joiners stay: emoji
+ * sequences like 👩‍💻 and several scripts need them.
+ */
+const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b\u200e\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g;
+
 export const cleanName = (s: unknown): string =>
-  (typeof s === 'string' ? s : '').replace(/\s+/g, ' ').trim().slice(0, 20) || 'Anonymous qubit';
+  (typeof s === 'string' ? s : '').replace(INVISIBLE, '').replace(/\s+/g, ' ').trim().slice(0, 20) || 'Anonymous qubit';
 
 export const cleanText = (s: unknown, max = 280): string =>
-  (typeof s === 'string' ? s : '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max);
+  (typeof s === 'string' ? s : '').replace(INVISIBLE, ' ').trim().slice(0, max);
+
+const isCell = (x: unknown): x is number => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 9;
+
+/** Copy only the fields a Move may have — never store or relay foreign junk. */
+export function sanitizeMove(m: unknown): Move | null {
+  if (!m || typeof m !== 'object') return null;
+  const o = m as Record<string, unknown>;
+  switch (o.kind) {
+    case 'place':
+    case 'observe':
+      return isCell(o.cell) ? { kind: o.kind, cell: o.cell } : null;
+    case 'split':
+    case 'link':
+      return isCell(o.a) && isCell(o.b) ? { kind: o.kind, a: o.a, b: o.b } : null;
+    case 'merge':
+      return isCell(o.a) && isCell(o.b) && Number.isInteger(o.turns) && (o.turns as number) >= 0 && (o.turns as number) < 4
+        ? { kind: 'merge', a: o.a, b: o.b, turns: o.turns as number }
+        : null;
+    default:
+      return null;
+  }
+}
 
 /** Validate untrusted settings, keeping `base` for anything missing or invalid. */
 export function sanitizeSettings(patch: unknown, base: RoomSettings = DEFAULT_ROOM_SETTINGS): RoomSettings {

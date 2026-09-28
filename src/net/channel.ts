@@ -19,6 +19,7 @@ export class Channel {
   #onClose: ((reason: string) => void) | null = null;
   #queue: HostMsg[] = [];
   #closed = false;
+  #released = false;
   #closeReason = '';
   readonly #send: (msg: ClientMsg) => void;
   readonly #close: () => void;
@@ -32,10 +33,20 @@ export class Channel {
     if (!this.#closed) this.#send(msg);
   }
 
+  /** Free the transport (PeerJS peer, socket, BroadcastChannel) exactly once. */
+  #release(): void {
+    if (this.#released) return;
+    this.#released = true;
+    try {
+      this.#close();
+    } catch {
+      /* already gone */
+    }
+  }
+
   close(): void {
-    if (this.#closed) return;
     this.#closed = true;
-    this.#close();
+    this.#release();
   }
 
   get closed(): boolean {
@@ -52,6 +63,7 @@ export class Channel {
 
   /** Called by the transport when a message arrives. */
   deliver(msg: HostMsg): void {
+    if (this.#closed) return;
     if (this.#onMessage) this.#onMessage(msg);
     else this.#queue.push(msg);
   }
@@ -59,9 +71,13 @@ export class Channel {
   /** Called by the transport when the connection dies. */
   lost(reason: string): void {
     if (this.#closed && this.#closeReason) return;
+    const wasClosed = this.#closed;
     this.#closed = true;
     this.#closeReason = reason;
-    this.#onClose?.(reason);
+    if (!wasClosed) this.#onClose?.(reason);
+    // A dead connection still holds resources (a PeerJS peer keeps its
+    // signalling socket open, for example) — let them go.
+    this.#release();
   }
 }
 

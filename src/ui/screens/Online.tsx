@@ -54,16 +54,23 @@ const BACKEND_INFO: Record<Backend, { name: string; icon: string; desc: string }
 export function OnlineHub() {
   const { info: server, checking, recheck } = useServer();
   const [room, setRoom] = useState<RoomSettings>({ ...DEFAULT_ROOM_SETTINGS, name: `${displayName()}'s room` });
-  const [backend, setBackend] = useState<Backend>(P2P_ENABLED ? 'p2p' : 'srv');
+  const [backend, setBackendState] = useState<Backend>(P2P_ENABLED ? 'p2p' : 'srv');
+  const [picked, setPicked] = useState(false);
+  const setBackend = (b: Backend) => {
+    setPicked(true);
+    setBackendState(b);
+  };
   const [busy, setBusy] = useState<string | null>(null);
   const [code, setCode] = useState('');
   const [lobby, setLobby] = useState<LobbyEntry[] | null>(null);
   const [customUrl, setCustomUrl] = useState(settings.value.customServer);
   const session = activeSession.value;
 
-  // Prefer the server when one is available.
+  // Prefer the server when one is available (its rooms survive tab closes and
+  // are listed publicly) — unless the player already chose something.
   useEffect(() => {
-    if (server && backend === 'p2p' && !P2P_ENABLED) setBackend('srv');
+    if (server && !picked) setBackendState('srv');
+    if (!server && backend === 'srv') setBackendState(P2P_ENABLED ? 'p2p' : 'local');
   }, [server]);
 
   // Poll the public lobby list.

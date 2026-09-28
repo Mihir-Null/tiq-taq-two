@@ -99,8 +99,8 @@ deploy/, nix/, Dockerfile, flake.nix, .github/workflows/
 
 The design choices worth knowing about (all explained in [ARCHITECTURE.md](docs/ARCHITECTURE.md)):
 
-- **Deterministic lockstep.** Online, only *moves* travel. Every client runs the same engine with the same seed, so collapses agree everywhere; a state fingerprint rides along with each move to catch any divergence.
-- **Fair dice.** The seed comes from a commit–reveal "coin flip" between the two players, so no one — not even the room host — controls the collapses.
+- **Deterministic lockstep.** Online, only *moves* travel. Every client runs the same engine with the same dice values, so collapses agree everywhere; a state fingerprint rides along with each move to catch any divergence.
+- **Fair dice.** Each player commits to a secret SHA-256 hash chain at the start; every move's dice combine one fresh value from each player, revealed only after the move is fixed. Nobody — not even the peer-to-peer room host — can steer *or predict* a collapse, and every client re-checks every value itself.
 - **One referee, two homes.** `RoomHost` runs in the creator's tab (P2P) or in the Node server — same code.
 - **Exact arithmetic where it matters.** Phases are always multiples of 90°, so amplitudes are bit-identical across browsers.
 

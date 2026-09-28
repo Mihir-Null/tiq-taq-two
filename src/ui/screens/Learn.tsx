@@ -153,7 +153,7 @@ function Rules() {
           <li><strong>Rings</strong> around a square show its odds: X, O and empty.</li>
           <li><strong>Faint tokens</strong> are uncertain; the percentage is the chance you'd find them there.</li>
           <li><strong>Coloured bars</strong> across the board show how likely each line is (if observed now).</li>
-          <li><strong>Curved links</strong> join squares that know about each other: <code>~</code> one token in two places, <code>⇄</code> an entangled X–O pair.</li>
+          <li><strong>Curved links</strong> join squares that know about each other: <code>~</code> one token in two places, <code>⇄</code> an entangled X–O pair, <code>≈</code> several moves tangled together (look at one square and you learn something about the other).</li>
           <li><strong>The forecast bar</strong> shows who would lead if everything were observed right now.</li>
           <li>The <strong>Multiverse</strong>, <strong>History</strong> and <strong>Physics</strong> tabs let you inspect everything — hover a universe to see it on the board, click a past move to rewind.</li>
         </ul>
@@ -207,8 +207,9 @@ MERGE      = HALF_SWAP(a,b) · KNOB_a(k)`}</pre>
           metrology, because the knob acts on the pair's total "charge" difference of 2.
         </p>
         <p>
-          Measurements follow the Born rule. Online, both players derive the random numbers from a shared seed that
-          neither controlled alone (a commit–reveal "coin flip"), so everyone sees the same universe become real.
+          Measurements follow the Born rule. Online, each move's random numbers combine a secret value from each player,
+          revealed only after the move is made (a hash-chain commit–reveal), so nobody can steer or predict a collapse
+          — and everyone sees the same universe become real.
         </p>
       </section>
     </div>

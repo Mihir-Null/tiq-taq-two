@@ -4,21 +4,32 @@
  * It keeps reactive copies of everything the UI needs (room snapshot, chat,
  * connection status) and replicates the game locally:
  *
- *   'game-start'  → verify the fair seed, build a GameController
- *   'moved'       → apply the move to our own engine copy with the shared
- *                   seed, compare the host's state fingerprint with ours
- *   'room'        → if we somehow fell behind, rebuild from the move list
+ *   'seed-request'   → build a secret hash chain, send only its anchor
+ *   'reveal-request' → the opponent's move rolls dice: check that move, then
+ *                      send our chain value for it (see fair-seed.ts)
+ *   'moved'          → re-check the move and both dice values ourselves,
+ *                      apply it to our own engine, compare fingerprints
+ *   'room'           → if we fell behind, rebuild — verifying every move
  *
  * Moves the local player makes go out through NetDriver and only appear on
  * the board once the host has accepted and echoed them.
+ *
+ * Trust: we never take the host's word for dice or history. Whatever it
+ * sends is replayed with our own engine, and any mismatch is reported.
  */
 
 import { signal, batch } from '@preact/signals';
-import { applyMove, rngForPly, newGame, X, O, type Move } from '../engine/index.ts';
+import {
+  applyMove, needsDice, seededRng, noDice, whyIllegal, sameMove, newGame, X, O,
+  type GameState, type Move, type MoveOutcome, type Player, type GameResult,
+} from '../engine/index.ts';
 import { GameController, type Driver, type SeatInfo, type Snapshot } from '../ui/game/controller.ts';
 import { sfx } from '../audio/sfx.ts';
-import { makeNonce, commitmentOf, combineSeed, verifyReveal } from './fair-seed.ts';
-import { PROTOCOL_VERSION, type HostMsg, type RoomSnapshot, type GameInfo, type Seat, type RoomSettings } from './protocol.ts';
+import { makeNonce, makeChain, anchorOf, chainValue, verifyChainValue, diceSeed } from './fair-seed.ts';
+import {
+  PROTOCOL_VERSION, sanitizeMove,
+  type HostMsg, type RoomSnapshot, type GameInfo, type Seat, type RoomSettings, type MoveRecord,
+} from './protocol.ts';
 import type { Channel } from './channel.ts';
 
 export type Backend = 'p2p' | 'srv' | 'local';
@@ -34,6 +45,8 @@ export interface ChatLine {
 }
 
 let lineIds = 1;
+
+const seatPlayer = (s: Seat): Player => (s === 'X' ? X : O);
 
 /**
  * A random id for this browser TAB. It survives reloads (sessionStorage), so
@@ -55,6 +68,30 @@ export function clientId(): string {
 }
 
 const tokenKey = (backend: Backend, code: string) => `tq2.token.${backend}.${code}`;
+const chainKey = (backend: Backend, code: string, gameId: string) => `tq2.chain.${backend}.${code}.${gameId}`;
+
+/**
+ * Replay one recorded move on top of `s`, checking everything: right player,
+ * legal move, dice values that match both players' chains, same fingerprint.
+ * Returns the outcome, or a description of what doesn't add up.
+ */
+export function verifyMove(g: Pick<GameInfo, 'id' | 'anchors'>, s: GameState, rec: MoveRecord): MoveOutcome | string {
+  if (rec.by !== 'X' && rec.by !== 'O') return 'a move by nobody';
+  if (seatPlayer(rec.by) !== s.toMove) return 'a move by the wrong player';
+  const move = sanitizeMove(rec.move);
+  if (!move || whyIllegal(s, move)) return 'an illegal move';
+  let rng: () => number = noDice;
+  if (needsDice(s, move)) {
+    const d = rec.dice;
+    if (!d || !verifyChainValue(g.anchors.X, d.X, s.ply) || !verifyChainValue(g.anchors.O, d.O, s.ply)) {
+      return "dice that don't match the players' commitments";
+    }
+    rng = seededRng(diceSeed(g.id, s.ply, d.X, d.O));
+  }
+  const out = applyMove(s, move, rng);
+  if (out.state.q.hash() !== rec.hash) return 'a different board than ours';
+  return out;
+}
 
 class NetDriver implements Driver {
   readonly #client: RoomClient;
@@ -64,15 +101,18 @@ class NetDriver implements Driver {
     this.#gameId = gameId;
   }
   submit(ctrl: GameController, move: Move): void {
-    ctrl.sending.value = true;
-    this.#client.send({ t: 'move', gameId: this.#gameId, ply: ctrl.live.value.ply, move });
     const ply = ctrl.live.value.ply;
+    const reveal = this.#client.chainValueFor(this.#gameId, ply);
+    if (!reveal) {
+      ctrl.say("This tab lost its dice for this game (was it opened elsewhere?) — you can't move from here.", true);
+      return;
+    }
+    ctrl.sending.value = true;
+    this.#client.send({ t: 'move', gameId: this.#gameId, ply, move, reveal });
     setTimeout(() => {
-      // No echo after a while? Ask for a full snapshot.
-      if (ctrl.sending.value && ctrl.live.value.ply === ply) {
-        ctrl.sending.value = false;
-        this.#client.send({ t: 'sync' });
-      }
+      // No echo after a while? Ask for a snapshot; it tells us whether the
+      // move is waiting for dice or got lost.
+      if (ctrl.sending.value && ctrl.live.value.ply === ply) this.#client.send({ t: 'sync' });
     }, 8000);
   }
 }
@@ -96,9 +136,14 @@ export class RoomClient {
   #channel: Channel | null = null;
   #reopen: () => Promise<Channel>;
   #name: string;
-  #nonces = new Map<string, string>();
+  /** Our secret hash chain per game id. */
+  #chains = new Map<string, string[]>();
+  /** Moves we sent our dice for, by move number — the host may not swap them afterwards. */
+  #revealed = new Map<number, Move>();
+  /** Games we resigned ourselves. */
+  #resigned = new Set<string>();
   #gameId: string | null = null;
-  #seed: string | null = null;
+  #game: GameInfo | null = null;
   #closedByUs = false;
   #pingTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -114,7 +159,7 @@ export class RoomClient {
     this.#channel = channel;
     channel.listen(
       (msg) => this.#onMessage(msg),
-      (reason) => this.#onLost(reason),
+      (reason) => void this.#onLost(reason),
     );
     let token: string | undefined;
     try {
@@ -132,19 +177,26 @@ export class RoomClient {
   }
 
   close(): void {
+    this.#stop();
+    this.ctrl.value?.dispose();
+  }
+
+  /** Terminal: no more reconnects, timers or transport. */
+  #stop(): void {
     this.#closedByUs = true;
     clearInterval(this.#pingTimer);
     this.#channel?.close();
-    this.ctrl.value?.dispose();
     this.status.value = 'closed';
   }
 
   async #onLost(reason: string): Promise<void> {
     if (this.#closedByUs || this.status.value === 'closed') return;
+    clearInterval(this.#pingTimer);
     this.status.value = 'reconnecting';
     this.#system(`${reason} Reconnecting…`);
     for (let attempt = 0; attempt < 5 && !this.#closedByUs; attempt++) {
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+      if (this.#closedByUs) return;
       try {
         const ch = await this.#reopen();
         if (this.#closedByUs) {
@@ -169,9 +221,78 @@ export class RoomClient {
     return r?.members.find((m) => m.id === me)?.seat ?? null;
   }
 
+  /** My seat in the current game (seats in the lobby can differ between games). */
+  #gameSeat(g: Pick<GameInfo, 'seats'> | null = this.#game): Seat | null {
+    if (!g) return null;
+    const me = this.me.value;
+    return g.seats.X === me ? 'X' : g.seats.O === me ? 'O' : null;
+  }
+
   amOwner(): boolean {
     const r = this.room.value;
     return r?.members.find((m) => m.id === this.me.value)?.isOwner ?? false;
+  }
+
+  // ─────────────────────────── dice ────────────────────────────────────────
+
+  #chain(gameId: string): string[] | null {
+    let chain = this.#chains.get(gameId);
+    if (!chain) {
+      // After a page reload the secret comes back from sessionStorage.
+      try {
+        const secret = sessionStorage.getItem(chainKey(this.backend, this.code, gameId));
+        if (secret) this.#chains.set(gameId, (chain = makeChain(secret)));
+      } catch {
+        /* ignore */
+      }
+    }
+    return chain ?? null;
+  }
+
+  /** My chain value for move number `ply` of game `gameId`. */
+  chainValueFor(gameId: string, ply: number): string | null {
+    const chain = this.#chain(gameId);
+    return chain ? chainValue(chain, ply) : null;
+  }
+
+  #onSeedRequest(gameId: string): void {
+    let chain = this.#chain(gameId);
+    if (!chain) {
+      const secret = makeNonce();
+      chain = makeChain(secret);
+      this.#chains.set(gameId, chain);
+      try {
+        sessionStorage.setItem(chainKey(this.backend, this.code, gameId), secret);
+      } catch {
+        /* the game still works until this tab reloads */
+      }
+    }
+    this.seeding.value = 'Agreeing on fair dice…';
+    this.send({ t: 'commit', gameId, anchor: anchorOf(chain) });
+  }
+
+  /**
+   * The opponent's move rolls dice and the host wants our value. Only answer
+   * for the move that is actually next, and only once per move number —
+   * otherwise a cheating host could learn our future values early.
+   */
+  #onRevealRequest(msg: Extract<HostMsg, { t: 'reveal-request' }>): void {
+    const c = this.ctrl.value;
+    const g = this.#game;
+    const mine = this.#gameSeat();
+    if (!c || !g || msg.gameId !== g.id || !mine || msg.by === mine) return;
+    const s = c.live.value;
+    const move = sanitizeMove(msg.move);
+    if (msg.ply !== s.ply || seatPlayer(msg.by) !== s.toMove || !move || whyIllegal(s, move) || !needsDice(s, move)) return;
+    const earlier = this.#revealed.get(msg.ply);
+    if (earlier && !sameMove(earlier, move)) {
+      this.#alarm('The host tried to change a move after seeing your dice.');
+      return;
+    }
+    const value = this.chainValueFor(g.id, msg.ply);
+    if (!value) return;
+    this.#revealed.set(msg.ply, move);
+    this.send({ t: 'reveal', gameId: g.id, ply: msg.ply, value });
   }
 
   // ─────────────────────────── actions ─────────────────────────────────────
@@ -186,7 +307,9 @@ export class RoomClient {
     this.send({ t: 'settings', settings });
   }
   resign(): void {
-    if (this.#gameId) this.send({ t: 'resign', gameId: this.#gameId });
+    if (!this.#gameId) return;
+    this.#resigned.add(this.#gameId);
+    this.send({ t: 'resign', gameId: this.#gameId });
   }
   rematch(want: boolean): void {
     if (this.#gameId) this.send({ t: 'rematch', gameId: this.#gameId, want });
@@ -202,6 +325,12 @@ export class RoomClient {
 
   #system(text: string): void {
     this.#push({ id: lineIds++, kind: 'system', text, at: Date.now() });
+  }
+
+  /** Something the host sent doesn't add up: tell the player, loudly. */
+  #alarm(text: string): void {
+    this.error.value = text;
+    this.#system(`⚠ ${text}`);
   }
 
   #push(line: ChatLine): void {
@@ -229,29 +358,24 @@ export class RoomClient {
         this.room.value = msg.room;
         this.#syncGame(msg.room.game);
         return;
-      case 'seed-request': {
-        const nonce = makeNonce();
-        this.#nonces.set(msg.gameId, nonce);
-        this.seeding.value = 'Agreeing on fair dice…';
-        this.send({ t: 'commit', gameId: msg.gameId, hash: commitmentOf(nonce) });
+      case 'seed-request':
+        this.#onSeedRequest(msg.gameId);
         return;
-      }
-      case 'reveal-request': {
-        const nonce = this.#nonces.get(msg.gameId);
-        if (nonce) this.send({ t: 'reveal', gameId: msg.gameId, nonce });
+      case 'reveal-request':
+        this.#onRevealRequest(msg);
         return;
-      }
       case 'game-start':
         this.seeding.value = null;
-        if (!this.#verifySeed(msg.game)) return;
-        this.#buildGame(msg.game);
+        this.#syncGame(msg.game);
         sfx.join();
         return;
       case 'moved':
         this.#onMoved(msg);
         return;
       case 'game-over':
-        if (msg.gameId === this.#gameId) this.ctrl.value?.endWith(msg.result);
+        if (msg.gameId !== this.#gameId) return;
+        this.#checkForcedResult(msg.result);
+        this.ctrl.value?.endWith(msg.result);
         return;
       case 'chat': {
         const mine = msg.from === this.me.value;
@@ -269,10 +393,9 @@ export class RoomClient {
         this.#system(`⚠ ${msg.message}`);
         if (['version', 'duplicate', 'full'].includes(msg.code)) {
           this.error.value = msg.message;
-          this.#closedByUs = true;
-          this.status.value = 'closed';
+          this.#stop();
         }
-        if (msg.code === 'illegal' || msg.code === 'stale' || msg.code === 'not-your-turn') {
+        if (['illegal', 'stale', 'not-your-turn', 'busy', 'bad-dice', 'bad-move'].includes(msg.code)) {
           const c = this.ctrl.value;
           if (c) {
             c.sending.value = false;
@@ -282,9 +405,8 @@ export class RoomClient {
         }
         return;
       case 'closed':
-        this.#closedByUs = true;
         this.error.value = msg.reason;
-        this.status.value = 'closed';
+        this.#stop();
         return;
       case 'pong':
         this.latency.value = Math.round(performance.now() - msg.at);
@@ -292,77 +414,94 @@ export class RoomClient {
     }
   }
 
-  /** Check the host's seed ceremony ourselves — never just trust it. */
-  #verifySeed(g: GameInfo): boolean {
-    const ok =
-      !!g.seed && !!g.commits.X && !!g.commits.O && !!g.nonces.X && !!g.nonces.O &&
-      verifyReveal(g.commits.X, g.nonces.X) && verifyReveal(g.commits.O, g.nonces.O) &&
-      combineSeed(g.nonces.X, g.nonces.O) === g.seed;
-    if (!ok) {
-      this.error.value = 'The dice could not be verified — the game data does not add up.';
-      this.#system('⚠ Seed verification failed. Leaving is recommended.');
+  /** A result from outside the engine (resignation, abandonment) — is it plausible? */
+  #checkForcedResult(r: GameResult): void {
+    const mine = this.#gameSeat();
+    if (!mine || !this.#gameId || r.winner === null || r.winner === seatPlayer(mine)) return;
+    if (r.reason === 'resign' && !this.#resigned.has(this.#gameId)) {
+      this.#system("⚠ The host says you resigned — you didn't. Treat this result with suspicion.");
     }
-    // Our own commitment must be the one the host recorded.
-    const mySeat = (['X', 'O'] as Seat[]).find((s) => g.seats[s] === this.me.value);
-    const mine = mySeat ? this.#nonces.get(g.id) : undefined;
-    if (mySeat && mine && g.nonces[mySeat] !== mine) {
-      this.error.value = 'The host altered your dice commitment!';
-      return false;
+    if (r.reason === 'abandon' && this.status.value === 'open') {
+      this.#system("⚠ The host says you left the game — but you're connected. Treat this result with suspicion.");
     }
-    return ok;
   }
 
   /** Make sure the local controller matches the host's game description. */
   #syncGame(g: GameInfo | null): void {
     if (!g || g.phase === 'seeding') {
       if (g?.phase === 'seeding' && !this.seeding.value) this.seeding.value = 'Starting the game…';
+      if (!g) this.seeding.value = null;
       if (!g && this.ctrl.value) {
         this.ctrl.value.dispose();
         this.ctrl.value = null;
         this.#gameId = null;
+        this.#game = null;
       }
       return;
     }
     this.seeding.value = null;
     const c = this.ctrl.value;
-    const upToDate = c && this.#gameId === g.id && c.snapshots.value.length - 1 === g.moves.length;
-    if (!upToDate) {
-      if (!this.#verifySeed(g)) return;
-      this.#buildGame(g);
-    } else if (g.forcedResult) c!.endWith(g.forcedResult);
-    // Seat names may change (reconnects) — keep them fresh.
+    const known = c && this.#gameId === g.id ? c.snapshots.value.length - 1 : -1;
+    if (known > g.moves.length) return; // an older snapshot overtaken by moves we already have
+    if (known !== g.moves.length && !this.#buildGame(g)) return;
+    this.#game = g;
     const cc = this.ctrl.value;
-    if (cc) cc.hintsAllowed.value = !!this.room.value?.settings.hints && this.mySeat() !== null;
+    if (!cc) return;
+    if (g.forcedResult && !cc.live.value.result) {
+      this.#checkForcedResult(g.forcedResult);
+      cc.endWith(g.forcedResult);
+    }
+    // Our own move may be waiting for the opponent's dice: keep the board locked.
+    const mine = this.#gameSeat(g);
+    cc.sending.value = !!g.pending && g.pending.by === mine;
+    cc.hintsAllowed.value = !!this.room.value?.settings.hints && mine !== null;
   }
 
-  #buildGame(g: GameInfo): void {
-    if (!g.seed) return;
+  /** Build (or rebuild) the local game from the host's move list, verifying every move. */
+  #buildGame(g: GameInfo): boolean {
+    if (!g.anchors.X || !g.anchors.O) return false;
     const me = this.me.value;
-    const seat = (s: Seat): SeatInfo => {
-      const local = g.seats[s] === me;
-      return { kind: local ? 'human' : 'remote', name: g.names[s], local };
-    };
     const old = this.ctrl.value;
-    const sameGame = old && this.#gameId === g.id;
-    // Replay every move with the shared seed to rebuild the history.
+    const sameGame = !!old && this.#gameId === g.id;
     const snaps: Snapshot[] = [{ state: newGame(g.rules, X), move: null, mover: null, events: [] }];
-    for (const move of g.moves) {
+    for (const rec of g.moves) {
       const s = snaps[snaps.length - 1].state;
-      const out = applyMove(s, move, rngForPly(g.seed, s.ply));
-      snaps.push({ state: out.state, move, mover: s.toMove, events: out.events });
+      const out = verifyMove(g, s, rec);
+      if (typeof out === 'string') {
+        this.#alarm(`The game data from the host contains ${out} at move ${s.ply + 1}. A different app version, or tampering — reload both pages.`);
+        return false;
+      }
+      snaps.push({ state: out.state, move: rec.move, mover: s.toMove, events: out.events });
+    }
+    if (sameGame) {
+      // History may only grow: the moves we already showed must still be there.
+      const had = old!.snapshots.value;
+      for (let i = 1; i < had.length; i++) {
+        const a = had[i].move;
+        const b = snaps[i]?.move;
+        if (!a || !b || !sameMove(a, b)) {
+          this.#alarm('The host rewrote moves that were already played. Leaving is recommended.');
+          return false;
+        }
+      }
     }
     if (g.forcedResult) {
       const last = snaps[snaps.length - 1];
       last.state = { ...last.state, result: g.forcedResult };
     }
-    this.#seed = g.seed;
     this.#gameId = g.id;
+    this.#game = g;
     if (sameGame) {
       old!.resetHistory(snaps);
       old!.sending.value = false;
-      return;
+      return true;
     }
+    this.#revealed.clear();
     old?.dispose();
+    const seat = (s: Seat): SeatInfo => {
+      const local = g.seats[s] === me;
+      return { kind: local ? 'human' : 'remote', name: g.names[s], local };
+    };
     const ctrl = new GameController({
       rules: g.rules,
       seats: { [X]: seat('X'), [O]: seat('O') },
@@ -372,11 +511,13 @@ export class RoomClient {
     });
     ctrl.resetHistory(snaps);
     this.ctrl.value = ctrl;
+    return true;
   }
 
   #onMoved(msg: Extract<HostMsg, { t: 'moved' }>): void {
     const c = this.ctrl.value;
-    if (!c || msg.gameId !== this.#gameId || !this.#seed) {
+    const g = this.#game;
+    if (!c || !g || msg.gameId !== this.#gameId) {
       this.send({ t: 'sync' });
       return;
     }
@@ -386,15 +527,19 @@ export class RoomClient {
       this.send({ t: 'sync' }); // we missed something
       return;
     }
-    const out = applyMove(s, msg.move, rngForPly(this.#seed, s.ply));
+    const promised = this.#revealed.get(msg.ply);
+    if (promised && !sameMove(promised, msg.move)) {
+      this.#alarm('The host played a different move than the one you sent your dice for.');
+      return;
+    }
+    const out = verifyMove(g, s, { move: msg.move, by: msg.by, dice: msg.dice, hash: msg.hash });
     c.sending.value = false;
-    if (out.state.q.hash() !== msg.hash) {
-      console.warn('desync detected — resyncing');
-      this.#system('Out of sync with the host — resynchronising.');
+    if (typeof out === 'string') {
+      // A fresh snapshot either fixes a glitch or shows the real problem.
+      this.#system(`Out of sync with the host (${out}) — resynchronising.`);
       this.send({ t: 'sync' });
       return;
     }
     c.accept(msg.move, s.toMove, out);
   }
 }
-

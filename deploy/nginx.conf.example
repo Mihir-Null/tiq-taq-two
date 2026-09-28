@@ -10,6 +10,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        # Appends the real client address as the LAST entry — the only one the
+        # server trusts with TRUST_PROXY=1 (earlier entries come from the client).
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_read_timeout 3600s;
     }

@@ -1,37 +1,65 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { RoomHost, type ConnHandle } from '../src/net/room-host.ts';
-import { commitmentOf, combineSeed, makeNonce, verifyReveal } from '../src/net/fair-seed.ts';
+import { makeNonce, makeChain, anchorOf, chainValue, verifyChainValue, CHAIN_LENGTH } from '../src/net/fair-seed.ts';
 import { sha256Hex } from '../src/net/sha256.ts';
-import { PROTOCOL_VERSION, DEFAULT_ROOM_SETTINGS, type HostMsg, type ClientMsg, type Seat } from '../src/net/protocol.ts';
-import { applyMove, newGame, rngForPly, X, type GameState, type Move } from '../src/engine/index.ts';
+import {
+  PROTOCOL_VERSION, DEFAULT_ROOM_SETTINGS, cleanName,
+  type HostMsg, type ClientMsg, type Seat, type GameInfo,
+} from '../src/net/protocol.ts';
+import { Channel } from '../src/net/channel.ts';
+import { newGame, applyMove, noDice, X, O, type GameState, type Move } from '../src/engine/index.ts';
+
+// The real RoomClient pulls in the game controller, which pulls in the bot's
+// Web Worker. Tests never need the bot, so replace it with a stub.
+vi.mock('../src/ai/client.ts', () => ({
+  ai: {
+    move: () => Promise.reject(new Error('no bot in tests')),
+    hints: () => Promise.resolve([]),
+  },
+}));
+const { RoomClient, clientId, verifyMove } = await import('../src/net/room-client.ts');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const wire = <T,>(x: T): T => JSON.parse(JSON.stringify(x)) as T;
 
-/** A minimal scripted client: records what it receives, answers the seed ceremony. */
+/**
+ * A minimal scripted client: records what it receives and plays the dice
+ * protocol honestly (unless told to misbehave).
+ */
 class FakeClient {
   inbox: HostMsg[] = [];
   handle: ConnHandle;
   id: string;
   token = '';
-  nonce = makeNonce();
+  chain = makeChain();
+  /** Send wrong chain values. */
   cheat = false;
+  /** Ignore reveal requests. */
+  silent = false;
   closed = false;
-  constructor(host: RoomHost, name: string, id = makeNonce(), token?: string) {
+  constructor(host: RoomHost, name: string, id = makeNonce(), token?: string, chain?: string[]) {
     this.id = id;
+    if (chain) this.chain = chain;
     this.handle = host.connect({
       send: (m) => {
-        const msg = JSON.parse(JSON.stringify(m)) as HostMsg;
+        const msg = wire(m);
         this.inbox.push(msg);
         if (msg.t === 'welcome') this.token = msg.token;
-        if (msg.t === 'seed-request') this.send({ t: 'commit', gameId: msg.gameId, hash: commitmentOf(this.nonce) });
-        if (msg.t === 'reveal-request') this.send({ t: 'reveal', gameId: msg.gameId, nonce: this.cheat ? makeNonce() : this.nonce });
+        if (msg.t === 'seed-request') this.send({ t: 'commit', gameId: msg.gameId, anchor: anchorOf(this.chain) });
+        if (msg.t === 'reveal-request' && !this.silent) this.send({ t: 'reveal', gameId: msg.gameId, ply: msg.ply, value: this.value(msg.ply) });
       },
       close: () => (this.closed = true),
     });
     this.send({ t: 'hello', v: PROTOCOL_VERSION, clientId: id, name, token });
   }
+  value(ply: number): string {
+    return this.cheat ? makeNonce() : chainValue(this.chain, ply)!;
+  }
   send(m: ClientMsg) {
-    this.handle.receive(JSON.parse(JSON.stringify(m)));
+    this.handle.receive(wire(m));
+  }
+  move(gameId: string, ply: number, move: Move) {
+    this.send({ t: 'move', gameId, ply, move, reveal: this.value(ply) });
   }
   last<T extends HostMsg['t']>(t: T): Extract<HostMsg, { t: T }> | undefined {
     return [...this.inbox].reverse().find((m) => m.t === t) as Extract<HostMsg, { t: T }> | undefined;
@@ -44,78 +72,162 @@ class FakeClient {
   }
 }
 
-function setup() {
-  const host = new RoomHost({ code: 'TEST1', settings: { ...DEFAULT_ROOM_SETTINGS, level: 3, quanta: 3 }, abandonAfterMs: 50, seedTimeoutMs: 200 });
+function setup(opts: { revealTimeoutMs?: number } = {}) {
+  const host = new RoomHost({
+    code: 'TEST1', settings: { ...DEFAULT_ROOM_SETTINGS, level: 3, quanta: 3 },
+    abandonAfterMs: 50, seedTimeoutMs: 200, ...opts,
+  });
   const a = new FakeClient(host, 'Alice');
   const b = new FakeClient(host, 'Bob');
   return { host, a, b };
 }
 
-describe('sha256', () => {
-  it('matches known test vectors', () => {
+/** Replay a game's move records like a client would; returns the final state. */
+function replay(g: GameInfo): GameState {
+  let s = newGame(g.rules, X);
+  for (const rec of g.moves) {
+    const out = verifyMove(g, s, rec);
+    if (typeof out === 'string') throw new Error(out);
+    s = out.state;
+  }
+  return s;
+}
+
+/** Split X over ①③, O on ⑤, X links ⑦ with ⑤ … then O observes ⑦: a move that rolls dice. */
+function playToObserve(a: FakeClient, b: FakeClient, gid: string) {
+  a.move(gid, 0, { kind: 'split', a: 0, b: 2 });
+  b.move(gid, 1, { kind: 'place', cell: 4 });
+  a.move(gid, 2, { kind: 'link', a: 6, b: 4 });
+  b.move(gid, 3, { kind: 'observe', cell: 6 });
+}
+
+describe('sha256 and hash chains', () => {
+  it('matches known SHA-256 test vectors', () => {
     expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
     expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
     expect(sha256Hex('a'.repeat(1000))).toBe('41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3');
   });
-  it('verifies reveals', () => {
-    const n = makeNonce();
-    expect(verifyReveal(commitmentOf(n), n)).toBe(true);
-    expect(verifyReveal(commitmentOf(n), makeNonce())).toBe(false);
+
+  it('verifies chain values only for their own move number', () => {
+    const chain = makeChain();
+    const anchor = anchorOf(chain);
+    for (const ply of [0, 1, 7, CHAIN_LENGTH - 1]) {
+      expect(verifyChainValue(anchor, chainValue(chain, ply), ply)).toBe(true);
+      expect(verifyChainValue(anchor, chainValue(chain, ply), ply + 1)).toBe(false);
+    }
+    expect(verifyChainValue(anchor, makeNonce(), 0)).toBe(false);
+    expect(verifyChainValue(anchor, chainValue(chain, 0), -1)).toBe(false);
+    expect(chainValue(chain, CHAIN_LENGTH)).toBeNull();
+    // Revealing move 5's value discloses moves 0–4 (hash forwards) but never move 6.
+    expect(verifyChainValue(chainValue(chain, 4), chainValue(chain, 5), 0)).toBe(true);
   });
 });
 
 describe('room host', () => {
   it('seats the first two players and makes the first the owner', () => {
     const { a, b } = setup();
-    const room = b.room!;
-    expect(room.members.map((m) => [m.name, m.seat, m.isOwner])).toEqual([
+    expect(b.room!.members.map((m) => [m.name, m.seat, m.isOwner])).toEqual([
       ['Alice', 'X', true],
       ['Bob', 'O', false],
     ]);
     expect(a.last('welcome')?.you).toBe(a.id);
   });
 
-  it('runs the fair-seed ceremony and a verified game', () => {
+  it('starts once both players committed to their dice, and plays a verified game', () => {
     const { host, a, b } = setup();
     a.send({ t: 'start' });
-    const start = b.last('game-start')!;
-    expect(start).toBeDefined();
-    const g = start.game;
-    expect(g.seed).toBe(combineSeed(a.nonce, b.nonce));
-    expect(verifyReveal(g.commits.X!, g.nonces.X!)).toBe(true);
+    const g = b.last('game-start')!.game;
+    expect(g.anchors).toEqual({ X: anchorOf(a.chain), O: anchorOf(b.chain) });
+    const gid = g.id;
 
-    // Replay locally, like a real client, and compare fingerprints.
-    let local: GameState = newGame(g.rules, X);
-    const play = (who: FakeClient, move: Move) => {
-      who.send({ t: 'move', gameId: g.id, ply: local.ply, move });
-      const echo = a.last('moved')!;
-      expect(echo.ply).toBe(local.ply);
-      local = applyMove(local, move, rngForPly(g.seed!, local.ply)).state;
-      expect(echo.hash).toBe(local.q.hash());
-    };
-    play(a, { kind: 'split', a: 0, b: 2 });
-    play(b, { kind: 'place', cell: 4 });
-    play(a, { kind: 'link', a: 6, b: 4 });
+    a.move(gid, 0, { kind: 'split', a: 0, b: 2 });
+    b.move(gid, 1, { kind: 'place', cell: 4 });
+    a.move(gid, 2, { kind: 'link', a: 6, b: 4 });
+    // None of those rolled dice, so nobody was asked for a value.
+    expect(a.all('reveal-request')).toHaveLength(0);
+    expect(b.all('reveal-request')).toHaveLength(0);
+    expect(host.snapshot().game!.moves.map((m) => m.dice)).toEqual([null, null, null]);
 
-    // Out-of-turn, stale and illegal moves are refused with a reason.
-    b.send({ t: 'move', gameId: g.id, ply: local.ply, move: { kind: 'place', cell: 0 } });
-    expect(b.last('error')?.code).toBe('illegal');
-    a.send({ t: 'move', gameId: g.id, ply: local.ply, move: { kind: 'place', cell: 1 } });
-    expect(a.last('error')?.code).toBe('not-your-turn');
-    b.send({ t: 'move', gameId: g.id, ply: 0, move: { kind: 'place', cell: 1 } });
-    expect(b.last('error')?.code).toBe('stale');
-    b.send({ t: 'move', gameId: g.id, ply: local.ply, move: { kind: 'teleport' } as unknown as Move });
-    expect(b.last('error')?.code).toBe('bad-move');
-    expect(host.snapshot().game?.moves).toHaveLength(3);
+    // An Observe rolls dice: only now is the OTHER player asked, and only for this move.
+    b.move(gid, 3, { kind: 'observe', cell: 6 });
+    const req = a.last('reveal-request')!;
+    expect(req).toMatchObject({ gameId: gid, ply: 3, move: { kind: 'observe', cell: 6 }, by: 'O' });
+    expect(b.all('reveal-request')).toHaveLength(0);
+    const moved = a.last('moved')!;
+    expect(moved.ply).toBe(3);
+    expect(moved.dice).toEqual({ X: chainValue(a.chain, 3), O: chainValue(b.chain, 3) });
+
+    // Every client can replay the whole game from the record and get the same board.
+    const g2 = host.snapshot().game!;
+    expect(replay(g2).q.hash()).toBe(moved.hash);
+
+    // Out-of-turn, stale, illegal and malformed moves are refused with a reason.
+    const ply = g2.moves.length;
+    b.move(gid, ply, { kind: 'place', cell: 1 });
+    expect(b.last('error')?.code).toBe('not-your-turn');
+    a.move(gid, 0, { kind: 'place', cell: 1 });
+    expect(a.last('error')?.code).toBe('stale');
+    a.move(gid, ply, { kind: 'place', cell: 0 });
+    expect(a.last('error')?.code).toBe('illegal');
+    a.move(gid, ply, { kind: 'teleport' } as unknown as Move);
+    expect(a.last('error')?.code).toBe('bad-move');
+    expect(host.snapshot().game?.moves).toHaveLength(4);
   });
 
-  it('cancels the game when a reveal does not match its commitment', () => {
-    const { a, b } = setup();
-    b.cheat = true;
+  it('keeps the mover’s dice value secret until the move resolves', () => {
+    const { host, a, b } = setup();
+    a.silent = true; // X will be slow to answer
     a.send({ t: 'start' });
-    expect(a.last('game-start')).toBeUndefined();
-    expect(a.all('system').some((m) => /didn't match/.test(m.text))).toBe(true);
-    expect(a.room?.game).toBeNull();
+    const gid = a.last('game-start')!.game.id;
+    playToObserve(a, b, gid);
+    const snap = host.snapshot().game!;
+    expect(snap.pending).toMatchObject({ ply: 3, by: 'O' });
+    expect(JSON.stringify(snap)).not.toContain(chainValue(b.chain, 3)!);
+    expect(JSON.stringify(a.last('reveal-request'))).not.toContain(chainValue(b.chain, 3)!);
+    // Moves wait for the dice.
+    a.move(gid, 4, { kind: 'place', cell: 8 });
+    expect(a.last('error')?.code).toBe('busy');
+  });
+
+  it('refuses a move whose dice value does not match, and forfeits a cheating answer', () => {
+    const { a, b } = setup();
+    a.send({ t: 'start' });
+    const gid = a.last('game-start')!.game.id;
+    a.cheat = true;
+    a.move(gid, 0, { kind: 'place', cell: 4 });
+    expect(a.last('error')?.code).toBe('bad-dice');
+    a.cheat = false;
+    a.move(gid, 0, { kind: 'split', a: 0, b: 2 });
+    b.move(gid, 1, { kind: 'place', cell: 4 });
+    a.move(gid, 2, { kind: 'link', a: 6, b: 4 });
+    a.cheat = true; // X answers the dice request with garbage
+    b.move(gid, 3, { kind: 'observe', cell: 6 });
+    expect(b.last('game-over')?.result).toMatchObject({ winner: O, reason: 'abandon' });
+  });
+
+  it('forfeits a connected player who never sends their dice', async () => {
+    const { a, b } = setup({ revealTimeoutMs: 40 });
+    a.silent = true;
+    a.send({ t: 'start' });
+    playToObserve(a, b, a.last('game-start')!.game.id);
+    expect(b.last('game-over')).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(b.last('game-over')?.result).toMatchObject({ winner: O, reason: 'abandon' });
+  });
+
+  it('asks a reconnecting player again for the dice it is waiting for', () => {
+    const { host, a, b } = setup();
+    a.silent = true;
+    a.send({ t: 'start' });
+    const gid = a.last('game-start')!.game.id;
+    playToObserve(a, b, gid);
+    a.handle.close();
+    const back = new FakeClient(host, 'Alice', a.id, a.token, a.chain);
+    // The honest client answers the repeated request on arrival.
+    expect(back.last('reveal-request')?.ply).toBe(3);
+    expect(back.last('moved')?.ply).toBe(3);
+    expect(host.snapshot().game!.pending).toBeNull();
+    void b;
   });
 
   it('lets a player reconnect with their token, but not impersonate', async () => {
@@ -145,16 +257,16 @@ describe('room host', () => {
     expect(seatOf(b.id)).toBe('X');
   });
 
-  it('gives late spectators the whole move list', () => {
+  it('gives late spectators the whole verifiable move list', () => {
     const { host, a, b } = setup();
     a.send({ t: 'start' });
-    const g = a.last('game-start')!.game;
-    a.send({ t: 'move', gameId: g.id, ply: 0, move: { kind: 'place', cell: 4 } });
+    const gid = a.last('game-start')!.game.id;
+    playToObserve(a, b, gid);
     const c = new FakeClient(host, 'Carol');
     const room = c.last('welcome')!.room;
     expect(room.members.find((m) => m.name === 'Carol')?.seat).toBeNull();
-    expect(room.game?.moves).toEqual([{ kind: 'place', cell: 4 }]);
-    expect(room.game?.seed).toBe(combineSeed(a.nonce, b.nonce));
+    expect(room.game?.moves).toHaveLength(4);
+    expect(replay(room.game!).q.hash()).toBe(a.last('moved')!.hash);
   });
 
   it('awards the game when a player abandons it', async () => {
@@ -166,12 +278,135 @@ describe('room host', () => {
     expect(a.last('game-over')?.result.winner).toBe(X);
   });
 
-  it('rate-limits chat and sanitises text', () => {
+  it('lets someone take the seat of a player who left, and keeps the room owned', () => {
+    const { host, a, b } = setup();
+    b.handle.close();
+    const c = new FakeClient(host, 'Carol');
+    expect(c.room!.members.find((m) => m.id === c.id)?.seat).toBeNull(); // Bob may come back…
+    c.send({ t: 'sit', seat: 'O' }); // …but Carol can take the seat
+    expect(host.snapshot().members.map((m) => m.name)).toEqual(['Alice', 'Carol']);
+    // The owner leaves while alone: the next person to arrive runs the room.
+    c.handle.close();
+    a.handle.close();
+    const d = new FakeClient(host, 'Dave');
+    expect(d.room!.members.find((m) => m.id === d.id)?.isOwner).toBe(true);
+  });
+
+  it('does not fill up with ghosts when people come and go', () => {
+    const { host } = setup();
+    for (let i = 0; i < 60; i++) new FakeClient(host, `Visitor ${i}`).handle.close();
+    expect(host.snapshot().members.length).toBeLessThanOrEqual(3);
+    expect(new FakeClient(host, 'Late').last('error')).toBeUndefined();
+  });
+
+  it('rate-limits chat, sanitises text and drops floods', () => {
     const { a, b } = setup();
     for (let i = 0; i < 10; i++) a.send({ t: 'chat', text: `  hi\u0007 ${i}  ` });
     const chats = b.all('chat');
     expect(chats).toHaveLength(6);
     expect(chats[0].text).toBe('hi  0');
     expect(a.last('error')?.code).toBe('slow-down');
+    for (let i = 0; i < 400; i++) b.send({ t: 'sync' });
+    expect(b.all('room').length).toBeLessThan(60);
+    expect(b.closed).toBe(true);
+  });
+
+  it('strips invisible characters from names', () => {
+    expect(cleanName('Al​ice‮')).toBe('Alice');
+    expect(cleanName('👩‍💻 Ada')).toBe('👩‍💻 Ada');
   });
 });
+
+describe('room client (the player’s side)', () => {
+  /** A real RoomClient wired to a scripted — possibly malicious — host. */
+  function scripted() {
+    const sent: ClientMsg[] = [];
+    const ch = new Channel((m) => sent.push(wire(m)), () => undefined);
+    const client = new RoomClient('p2p', 'ABCDE', 'Guest', () => Promise.reject(new Error('no reopen')));
+    client.attach(ch);
+    const me = clientId();
+    const hostChain = makeChain();
+    const game: GameInfo = {
+      id: 'ABCDE-1', rules: { level: 2, quanta: 2 }, seats: { X: 'host', O: me }, names: { X: 'Host', O: 'Guest' },
+      phase: 'playing', anchors: { X: anchorOf(hostChain) }, moves: [], pending: null, forcedResult: null, rematch: { X: false, O: false },
+    };
+    const room = (g: GameInfo | null) => ({
+      code: 'ABCDE', settings: { ...DEFAULT_ROOM_SETTINGS, level: 2 as const, quanta: 2 },
+      members: [
+        { id: 'host', name: 'Host', seat: 'X' as Seat, connected: true, isOwner: true },
+        { id: me, name: 'Guest', seat: 'O' as Seat, connected: true, isOwner: false },
+      ],
+      game: g, gamesPlayed: 0,
+    });
+    ch.deliver({ t: 'welcome', you: me, token: 'tok', room: room(null) });
+    ch.deliver({ t: 'seed-request', gameId: game.id });
+    const commit = sent.find((m) => m.t === 'commit') as Extract<ClientMsg, { t: 'commit' }>;
+    game.anchors.O = commit.anchor;
+    ch.deliver({ t: 'game-start', game: wire(game) });
+    return { sent, ch, client, game, hostChain, room };
+  }
+
+  it('only reveals its dice for the opponent’s actual next move', () => {
+    const { sent, ch, client, game } = scripted();
+    const reveals = () => sent.filter((m) => m.t === 'reveal');
+    // A future move number, a move that rolls no dice, or a request for "my own" move: refused.
+    ch.deliver({ t: 'reveal-request', gameId: game.id, ply: 5, move: { kind: 'place', cell: 4 }, by: 'X' });
+    ch.deliver({ t: 'reveal-request', gameId: game.id, ply: 0, move: { kind: 'place', cell: 4 }, by: 'X' });
+    ch.deliver({ t: 'reveal-request', gameId: game.id, ply: 0, move: { kind: 'place', cell: 4 }, by: 'O' });
+    expect(reveals()).toHaveLength(0);
+    expect(client.ctrl.value).not.toBeNull();
+  });
+
+  it('checks every move itself, and notices rewritten history', () => {
+    const { ch, client, game, room } = scripted();
+    const ctrl = client.ctrl.value!;
+    const move: Move = { kind: 'place', cell: 4 };
+    const hash = hashAfterPlace(game);
+    // A wrong fingerprint is caught…
+    expect(verifyMove(game, ctrl.live.value, { move, by: 'X', dice: null, hash: 'x' })).toBe('a different board than ours');
+    // …an honest move is applied.
+    ch.deliver({ t: 'moved', gameId: game.id, ply: 0, move, by: 'X', hash, dice: null });
+    expect(ctrl.snapshots.value).toHaveLength(2);
+    // A later snapshot that swaps that move for another is refused, loudly.
+    const other: Move = { kind: 'place', cell: 0 };
+    const otherHash = applyMove(newGame(game.rules, X), other, noDice).state.q.hash();
+    const s1 = applyMove(newGame(game.rules, X), other, noDice).state;
+    const next: Move = { kind: 'place', cell: 8 };
+    const forged: GameInfo = {
+      ...game,
+      moves: [
+        { move: other, by: 'X', dice: null, hash: otherHash },
+        { move: next, by: 'O', dice: null, hash: applyMove(s1, next, noDice).state.q.hash() },
+      ],
+    };
+    ch.deliver({ t: 'room', room: room(forged) });
+    expect(client.error.value).toMatch(/rewrote/);
+    expect(ctrl.snapshots.value[1].move).toEqual(move);
+  });
+
+  it('rejects dice values that do not match the players’ commitments', () => {
+    const { ch, client, game, room } = scripted();
+    // Build a legal game up to an Observe, then attach made-up dice to it.
+    let s = newGame(game.rules, X);
+    const moves: Move[] = [{ kind: 'split', a: 0, b: 2 }, { kind: 'place', cell: 4 }, { kind: 'link', a: 6, b: 4 }];
+    const recs = moves.map((move, i) => {
+      s = applyMove(s, move, noDice).state;
+      return { move, by: (i % 2 === 0 ? 'X' : 'O') as Seat, dice: null, hash: s.q.hash() };
+    });
+    const fakeDice = { X: makeNonce(), O: makeNonce() };
+    const observe: Move = { kind: 'observe', cell: 6 };
+    ch.deliver({ t: 'room', room: room({ ...game, moves: [...recs, { move: observe, by: 'O', dice: fakeDice, hash: 'x' }] }) });
+    expect(client.error.value).toMatch(/dice that don't match/);
+  });
+
+  it('flags a forced result that cannot be true', () => {
+    const { ch, client, game } = scripted();
+    ch.deliver({ t: 'game-over', gameId: game.id, result: { winner: X, xLines: 0, oLines: 0, code: null, certain: true, reason: 'resign' } });
+    expect(client.chat.value.some((l) => /you resigned — you didn't/.test(l.text))).toBe(true);
+  });
+});
+
+/** Fingerprint after X places on ⑤ in a fresh game (no dice involved). */
+function hashAfterPlace(g: GameInfo): string {
+  return applyMove(newGame(g.rules, X), { kind: 'place', cell: 4 }, noDice).state.q.hash();
+}

@@ -4,27 +4,29 @@
  *
  * Responsibilities:
  *   • members: who is here, who sits in the X / O seat, who only watches;
- *   • the fair-seed ceremony (commit–reveal, see fair-seed.ts);
+ *   • fair dice: collecting each player's hash-chain anchor at the start and
+ *     their per-move values during play (see fair-seed.ts);
  *   • validating every move with the real engine and broadcasting it;
  *   • chat, emotes, rematches, resignations, disconnects and reconnects.
  *
- * It never trusts incoming data: every message is shape-checked, rate
- * limited where it matters, and moves are re-validated by the engine.
+ * It never trusts incoming data: every message is shape-checked, every
+ * connection is rate limited, and moves are re-validated by the engine.
  *
  * Transport-agnostic: it talks to "connections" that only need send() and
  * close(). WebSockets, WebRTC data channels and in-memory pipes all fit.
  */
 
 import {
-  newGame, applyMove, whyIllegal, rngForPly, resign as resignState, abandon as abandonState, X, O,
+  newGame, applyMove, whyIllegal, needsDice, seededRng, noDice,
+  resign as resignState, abandon as abandonState, X, O,
   type GameState, type Move, type Player,
 } from '../engine/index.ts';
 import {
-  PROTOCOL_VERSION, EMOTES, cleanName, cleanText, sanitizeSettings,
+  PROTOCOL_VERSION, EMOTES, cleanName, cleanText, sanitizeSettings, sanitizeMove,
   type ClientMsg, type HostMsg, type RoomSettings, type RoomSnapshot, type MemberInfo, type GameInfo,
   type Seat, type LobbyEntry,
 } from './protocol.ts';
-import { verifyReveal, combineSeed, makeNonce } from './fair-seed.ts';
+import { makeNonce, isAnchor, verifyChainValue, diceSeed } from './fair-seed.ts';
 
 export interface Conn {
   send(msg: HostMsg): void;
@@ -49,6 +51,8 @@ interface Member {
 
 interface HostGame extends GameInfo {
   state: GameState | null;
+  /** Chain values received for the pending move (kept private until it resolves). */
+  pendingDice: Partial<Record<Seat, string>>;
 }
 
 export interface RoomHostOptions {
@@ -58,8 +62,10 @@ export interface RoomHostOptions {
   onChange?: () => void;
   /** A seated player who stays disconnected this long forfeits. */
   abandonAfterMs?: number;
-  /** Max time for the seed ceremony. */
+  /** Max time for both players to commit to their dice at the start. */
   seedTimeoutMs?: number;
+  /** A connected player who doesn't send their dice value this long forfeits. */
+  revealTimeoutMs?: number;
   maxMembers?: number;
   log?: (...args: unknown[]) => void;
 }
@@ -67,28 +73,6 @@ export interface RoomHostOptions {
 const SEATS: Seat[] = ['X', 'O'];
 const seatPlayer = (s: Seat): Player => (s === 'X' ? X : O);
 const otherSeat = (s: Seat): Seat => (s === 'X' ? 'O' : 'X');
-const isCell = (x: unknown): x is number => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 9;
-
-/** Copy only the fields a Move may have — never store or relay foreign junk. */
-export function sanitizeMove(m: unknown): Move | null {
-  if (!m || typeof m !== 'object') return null;
-  const o = m as Record<string, unknown>;
-  switch (o.kind) {
-    case 'place':
-    case 'observe':
-      return isCell(o.cell) ? { kind: o.kind, cell: o.cell } : null;
-    case 'split':
-    case 'link':
-      return isCell(o.a) && isCell(o.b) ? { kind: o.kind, a: o.a, b: o.b } : null;
-    case 'merge':
-      return isCell(o.a) && isCell(o.b) && Number.isInteger(o.turns) && (o.turns as number) >= 0 && (o.turns as number) < 4
-        ? { kind: 'merge', a: o.a, b: o.b, turns: o.turns as number }
-        : null;
-    default:
-      return null;
-  }
-}
-
 export class RoomHost {
   readonly code: string;
   settings: RoomSettings;
@@ -104,7 +88,7 @@ export class RoomHost {
   constructor(opts: RoomHostOptions) {
     this.code = opts.code;
     this.settings = { ...opts.settings };
-    this.#opts = { abandonAfterMs: 90_000, seedTimeoutMs: 20_000, maxMembers: 24, ...opts };
+    this.#opts = { abandonAfterMs: 90_000, seedTimeoutMs: 20_000, revealTimeoutMs: 45_000, maxMembers: 24, ...opts };
   }
 
   // ─────────────────────────── connections ─────────────────────────────────
@@ -112,14 +96,29 @@ export class RoomHost {
   /** Attach a new connection. Its first message must be `hello`. */
   connect(conn: Conn): ConnHandle {
     let member: Member | null = null;
+    // Token bucket: bursts of up to 40 messages, 8 per second sustained. A
+    // human never gets near that; a flood is dropped, then disconnected.
+    let tokens = 40;
+    let last = Date.now();
+    let dropped = 0;
     return {
       receive: (raw: unknown) => {
         if (this.#closed) return;
+        const now = Date.now();
+        tokens = Math.min(40, tokens + ((now - last) * 8) / 1000);
+        last = now;
+        if (tokens < 1) {
+          if (++dropped === 200) conn.close('Too many messages.');
+          return;
+        }
+        tokens -= 1;
         const msg = raw as ClientMsg;
         if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
         try {
           if (!member) {
-            if (msg.t === 'hello') member = this.#hello(conn, msg);
+            if (msg.t !== 'hello') return;
+            member = this.#hello(conn, msg);
+            if (member) this.#resume(member);
             return;
           }
           if (member.conn !== conn) return; // replaced by a newer connection
@@ -130,7 +129,7 @@ export class RoomHost {
         }
       },
       close: () => {
-        if (member && member.conn === conn) this.#disconnect(member);
+        if (!this.#closed && member && member.conn === conn) this.#disconnect(member);
       },
     };
   }
@@ -165,12 +164,14 @@ export class RoomHost {
       connected: m.conn !== null,
       isOwner: m.isOwner,
     }));
-    let game: GameInfo | null = null;
-    if (this.#game) {
-      const { state: _state, ...info } = this.#game;
-      game = structuredClone(info);
-    }
+    const game = this.#game ? this.#publicGame(this.#game) : null;
     return { code: this.code, settings: { ...this.settings }, members, game, gamesPlayed: this.#gamesPlayed };
+  }
+
+  /** Everything about the game that everyone may see (never unrevealed dice). */
+  #publicGame(g: HostGame): GameInfo {
+    const { state: _state, pendingDice: _secret, ...info } = g;
+    return structuredClone(info);
   }
 
   lobbyEntry(): LobbyEntry {
@@ -245,30 +246,48 @@ export class RoomHost {
       this.#clearTimer(`abandon:${m.id}`);
       this.#system(`${m.name} reconnected.`);
     } else {
+      this.#prune();
       if (this.#members.size >= this.#opts.maxMembers) {
         conn.send({ t: 'error', code: 'full', message: 'This room is full.' });
         conn.close('full');
         return null;
       }
-      const isOwner = ![...this.#members.values()].some((x) => x.isOwner);
-      m = { id, token: makeNonce(), name: cleanName(msg.name), seat: null, conn, isOwner, recent: [] };
-      if (!this.#inProgress()) {
-        const taken = new Set([...this.#members.values()].map((x) => x.seat));
-        m.seat = SEATS.find((s) => !taken.has(s)) ?? null;
-      }
+      m = { id, token: makeNonce(), name: cleanName(msg.name), seat: null, conn, isOwner: false, recent: [] };
+      // Newcomers take a free seat. (A seat whose player has left stays theirs
+      // for a reconnect, but anyone present may take it with "Take seat".)
+      if (!this.#inProgress()) m.seat = SEATS.find((seat) => !this.#holder(seat)) ?? null;
       this.#members.set(id, m);
       this.#system(`${m.name} joined${m.seat ? ` as ${m.seat}` : ' to watch'}.`);
     }
+    // A room always needs someone present who can start games and change rules.
+    if (![...this.#members.values()].some((x) => x.isOwner && x.conn)) {
+      for (const x of this.#members.values()) x.isOwner = x === m;
+    }
     conn.send({ t: 'welcome', you: m.id, token: m.token, room: this.snapshot() });
     this.#broadcastRoom();
-    // Rejoining in the middle of the seed ceremony: ask again.
-    const g = this.#game;
-    const seat = g ? SEATS.find((s) => g.seats[s] === m!.id) : undefined;
-    if (g && g.phase === 'seeding' && seat) {
-      if (!g.commits[seat]) conn.send({ t: 'seed-request', gameId: g.id });
-      else if (g.commits.X && g.commits.O && !g.nonces[seat]) conn.send({ t: 'reveal-request', gameId: g.id });
-    }
     return m;
+  }
+
+  /** Back in the middle of a game? Ask again for whatever we were waiting for. */
+  #resume(m: Member): void {
+    const g = this.#game;
+    const seat = g ? SEATS.find((s) => g.seats[s] === m.id) : undefined;
+    if (!g || !seat) return;
+    if (g.phase === 'seeding' && !g.anchors[seat]) m.conn?.send({ t: 'seed-request', gameId: g.id });
+    if (g.phase === 'playing' && g.pending && g.pending.by !== seat && !g.pendingDice[seat]) this.#requestReveal(g, seat);
+  }
+
+  #holder(seat: Seat): Member | undefined {
+    return [...this.#members.values()].find((x) => x.seat === seat);
+  }
+
+  /** Forget members who left and hold nothing (no seat, not in the current game). */
+  #prune(): void {
+    const g = this.#game;
+    for (const [id, x] of this.#members) {
+      const inGame = g && (g.seats.X === id || g.seats.O === id) && g.phase !== 'over';
+      if (!x.conn && !x.seat && !inGame) this.#members.delete(id);
+    }
   }
 
   #disconnect(m: Member): void {
@@ -287,12 +306,14 @@ export class RoomHost {
     } else {
       this.#system(`${m.name} left.`);
     }
-    // Watchers who leave are simply forgotten; players keep their seat for a reconnect.
+    // Watchers who leave are simply forgotten; players keep their seat for a
+    // reconnect (until someone else takes it between games).
     if (!m.seat && !seat) this.#members.delete(m.id);
     if (m.isOwner) this.#passOwnership(m);
     this.#broadcastRoom();
   }
 
+  /** Hand ownership to someone still here. If nobody is, the next arrival gets it (#hello). */
   #passOwnership(from: Member): void {
     const next = [...this.#members.values()].find((x) => x.conn && x !== from);
     if (!next) return;
@@ -359,10 +380,12 @@ export class RoomHost {
     if (this.#inProgress()) return this.#err(m, 'in-game', "You can't change seats during a game.");
     if (seat !== null && seat !== 'X' && seat !== 'O') return;
     if (seat) {
-      const holder = [...this.#members.values()].find((x) => x.seat === seat);
+      const holder = this.#holder(seat);
       if (holder && holder !== m) {
         if (holder.conn) return this.#err(m, 'seat-taken', 'That seat is taken.');
-        holder.seat = null; // an absent player's seat can be taken
+        // An absent player's seat can be taken; they are then simply gone.
+        this.#members.delete(holder.id);
+        this.#system(`${m.name} took ${holder.name}'s seat.`);
       }
     }
     m.seat = seat;
@@ -397,13 +420,13 @@ export class RoomHost {
       seats: { X: xm.id, O: om.id },
       names: { X: xm.name, O: om.name },
       phase: 'seeding',
-      commits: {},
-      nonces: {},
-      seed: null,
+      anchors: {},
       moves: [],
+      pending: null,
       forcedResult: null,
       rematch: { X: false, O: false },
       state: null,
+      pendingDice: {},
     };
     const gid = this.#game.id;
     this.#broadcastRoom();
@@ -416,6 +439,7 @@ export class RoomHost {
 
   #cancelGame(why: string): void {
     this.#clearTimer('seed');
+    this.#clearTimer('reveal');
     this.#game = null;
     this.#system(why);
     this.#broadcastRoom();
@@ -430,59 +454,97 @@ export class RoomHost {
   #commit(m: Member, msg: Extract<ClientMsg, { t: 'commit' }>): void {
     const g = this.#game;
     const seat = this.#seatOf(m, msg.gameId);
-    if (!g || !seat || g.phase !== 'seeding' || g.commits[seat]) return;
-    if (typeof msg.hash !== 'string' || !/^[0-9a-f]{64}$/.test(msg.hash)) return;
-    g.commits[seat] = msg.hash;
-    if (g.commits.X && g.commits.O) this.#broadcast({ t: 'reveal-request', gameId: g.id });
-  }
-
-  #reveal(m: Member, msg: Extract<ClientMsg, { t: 'reveal' }>): void {
-    const g = this.#game;
-    const seat = this.#seatOf(m, msg.gameId);
-    if (!g || !seat || g.phase !== 'seeding' || !g.commits.X || !g.commits.O || g.nonces[seat]) return;
-    if (!verifyReveal(g.commits[seat]!, msg.nonce)) {
-      this.#cancelGame(`${m.name}'s dice didn't match their commitment — game cancelled.`);
-      return;
-    }
-    g.nonces[seat] = msg.nonce;
-    if (g.nonces.X && g.nonces.O) {
-      this.#clearTimer('seed');
-      g.seed = combineSeed(g.nonces.X, g.nonces.O);
-      g.state = newGame(g.rules, X);
-      g.phase = 'playing';
-      const { state: _state, ...info } = g;
-      this.#broadcast({ t: 'game-start', game: structuredClone(info) });
-      this.#broadcastRoom();
-    }
+    if (!g || !seat || g.phase !== 'seeding' || g.anchors[seat] || !isAnchor(msg.anchor)) return;
+    g.anchors[seat] = msg.anchor;
+    if (!g.anchors.X || !g.anchors.O) return;
+    // Both players are bound to their chains: play can begin.
+    this.#clearTimer('seed');
+    g.state = newGame(g.rules, X);
+    g.phase = 'playing';
+    this.#broadcast({ t: 'game-start', game: this.#publicGame(g) });
+    this.#broadcastRoom();
   }
 
   #move(m: Member, msg: Extract<ClientMsg, { t: 'move' }>): void {
     const g = this.#game;
     const seat = this.#seatOf(m, msg.gameId);
-    if (!g || !seat || g.phase !== 'playing' || !g.state || !g.seed) return;
+    if (!g || !seat || g.phase !== 'playing' || !g.state) return;
     const s = g.state;
+    if (g.pending) return this.#err(m, 'busy', 'Waiting for the dice of the last move.');
     if (seatPlayer(seat) !== s.toMove) return this.#err(m, 'not-your-turn', "It's not your turn.");
     if (msg.ply !== s.ply) return this.#err(m, 'stale', 'That move was for an older position.');
     const move = sanitizeMove(msg.move);
     if (!move) return this.#err(m, 'bad-move', 'Malformed move.');
     const why = whyIllegal(s, move);
     if (why) return this.#err(m, 'illegal', why);
-    const out = applyMove(s, move, rngForPly(g.seed, s.ply));
+    // (A chain covers CHAIN_LENGTH moves — far more than the ⚡ limits allow.)
+    if (!verifyChainValue(g.anchors[seat], msg.reveal, s.ply)) return this.#err(m, 'bad-dice', "Your dice value doesn't match your commitment — reload the page.");
+    if (!needsDice(s, move)) {
+      this.#finishMove(g, move, seat, null);
+      return;
+    }
+    // This move rolls dice: now (and only now) the other player adds theirs.
+    g.pending = { ply: s.ply, move, by: seat };
+    g.pendingDice = { [seat]: msg.reveal };
+    const opp = otherSeat(seat);
+    this.#requestReveal(g, opp);
+    this.#broadcastRoom();
+  }
+
+  /** Ask `seat` for its chain value for the pending move; forfeit them if they stall while connected. */
+  #requestReveal(g: HostGame, seat: Seat): void {
+    const p = g.pending;
+    const who = this.#members.get(g.seats[seat]);
+    if (!p || !who) return;
+    who.conn?.send({ t: 'reveal-request', gameId: g.id, ply: p.ply, move: p.move, by: p.by });
+    this.#timer('reveal', this.#opts.revealTimeoutMs, () => {
+      const cur = this.#game;
+      if (cur !== g || cur.pending !== p || !g.state) return;
+      // Disconnected players are handled by the (longer) abandon timer instead.
+      if (who.conn) this.#forceEnd(abandonState(g.state, seatPlayer(seat)), `${who.name} did not send their dice.`);
+    });
+  }
+
+  #reveal(m: Member, msg: Extract<ClientMsg, { t: 'reveal' }>): void {
+    const g = this.#game;
+    const seat = this.#seatOf(m, msg.gameId);
+    const p = g?.pending;
+    if (!g || !seat || !p || g.phase !== 'playing' || !g.state || p.by === seat || msg.ply !== p.ply || g.pendingDice[seat]) return;
+    if (!verifyChainValue(g.anchors[seat], msg.value, p.ply)) {
+      this.#forceEnd(abandonState(g.state, seatPlayer(seat)), `${m.name}'s dice didn't match their commitment.`);
+      return;
+    }
+    this.#clearTimer('reveal');
+    const dice = { ...g.pendingDice, [seat]: msg.value } as Record<Seat, string>;
+    g.pending = null;
+    g.pendingDice = {};
+    this.#finishMove(g, p.move, p.by, dice);
+  }
+
+  /** Apply an accepted move with its dice (if any) and tell everyone. */
+  #finishMove(g: HostGame, move: Move, by: Seat, dice: Record<Seat, string> | null): void {
+    const s = g.state!;
+    const rng = dice ? seededRng(diceSeed(g.id, s.ply, dice.X, dice.O)) : noDice;
+    const out = applyMove(s, move, rng);
+    const hash = out.state.q.hash();
     g.state = out.state;
-    g.moves.push(move);
-    this.#broadcast({ t: 'moved', gameId: g.id, ply: s.ply, move, by: seat, hash: out.state.q.hash() });
+    g.moves.push({ move, by, dice, hash });
+    this.#broadcast({ t: 'moved', gameId: g.id, ply: s.ply, move, by, hash, dice });
     if (out.state.result) {
       g.phase = 'over';
       this.#gamesPlayed++;
-      this.#broadcastRoom();
     }
+    this.#broadcastRoom();
   }
 
   #forceEnd(state: GameState, why: string): void {
     const g = this.#game;
     if (!g || !state.result) return;
+    this.#clearTimer('reveal');
     g.state = state;
     g.forcedResult = state.result;
+    g.pending = null;
+    g.pendingDice = {};
     g.phase = 'over';
     this.#gamesPlayed++;
     this.#system(why);

@@ -105,13 +105,13 @@ The per-square rings are the marginals $p_a(v)$ — the reduced density matrix's
 
 ## 7. Determinism for online play
 
-All clients must see the same collapses. Rather than trusting a sender's claimed outcome, both players run the same engine with a **shared seed** (`rng.ts`: xmur3 + sfc32, 32-bit integer math only). For this to work the floating-point arithmetic must also be identical everywhere:
+All clients must see the same collapses. Rather than trusting a sender's claimed outcome, every client runs the same engine with the **same random numbers**, seeded per move by both players (`rng.ts`: xmur3 + sfc32, 32-bit integer math only). For this to work the floating-point arithmetic must also be identical everywhere:
 
-- amplitudes are only ever multiplied by $1/\sqrt2$ and by $\pm1, \pm i$ (no `Math.sin`, whose last bit may differ between engines);
+- gates only ever multiply amplitudes by $1/\sqrt2$ and by $\pm1, \pm i$ (no `Math.sin`, whose last bit may differ between engines); measurements renormalise by $1/\sqrt{P}$, which is safe too — IEEE-754 requires `sqrt` and division to be correctly rounded, so every engine gets the same bits;
 - universes are always iterated in ascending board order, so sums are accumulated in the same order;
 - after each move clients compare a fingerprint of the rounded amplitudes (`QState.hash`) with the host's.
 
-The seed itself comes from a commit–reveal protocol (`net/fair-seed.ts`), so neither player chooses it.
+The random numbers for each move come from a hash-chain commit–reveal protocol (`net/fair-seed.ts`): neither player chooses them, and neither can know them before the move is fixed.
 
 ## 8. What's physics and what's game design
 

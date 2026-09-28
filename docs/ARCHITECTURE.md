@@ -18,7 +18,7 @@ A guided tour of the code: what each part does, how the parts talk, and why they
                                                           BroadcastChannel       │
                           ┌──────────────── RoomHost (referee) ◀────────────────┘
                           │  in the creator's tab (P2P) or in server/main.ts
-                          │  seats · fair seed · validates moves with the engine
+                          │  seats · fair dice · validates moves with the engine
                           └──▶ broadcasts accepted moves to every client
 ```
 
@@ -36,12 +36,12 @@ No DOM, no timers, no randomness of its own. The same files run in the browser, 
 | `analysis.ts` | Marginals, line odds, forecast, mutual-information links, interference "meetings". |
 | `explain.ts` | Turns a preview into plain English. |
 | `notation.ts` | Short notation (`①~③`, `②⇄⑤`, `◉⑤`, `③⋈⑤@90°`) and sentences. |
-| `rng.ts` | Seeded PRNG: `rngForPly(seed, ply)` gives each move its own random stream. |
+| `rng.ts` | Seeded PRNG: `seededRng(key)`; `rngForPly(seed, ply)` gives each move its own random stream (local games). |
 | `serialize.ts` | GameState ⇄ plain JSON (for the worker and the network). |
 
 **Immutability pays off everywhere.** `applyMove` returns a new `GameState`, so previews are just "apply without committing", undo is "drop the last snapshot", and time travel is "show an old snapshot". There is no state mutation to un-do.
 
-**Randomness is injected.** `applyMove(state, move, rng)` never calls `Math.random`. Local games pass a seeded stream; lessons pass scripted numbers (so the story always unfolds the same way); the bot passes carefully chosen numbers to enumerate every outcome (`allOutcomes`); online games pass the shared seed.
+**Randomness is injected.** `applyMove(state, move, rng)` never calls `Math.random`. Local games pass a seeded stream; lessons pass scripted numbers (so the story always unfolds the same way); the bot passes carefully chosen numbers to enumerate every outcome (`allOutcomes`); online games pass a stream seeded by both players' dice values for that move.
 
 ## 2. The UI (`src/ui/`, Preact + signals)
 
@@ -90,15 +90,18 @@ Styles live in `ui/styles/`: `themes.css` holds the two themes as CSS variables;
 
 ### Lockstep replication
 
-Only **moves** cross the network. The room host validates each move with the engine, applies it with the shared seed, and broadcasts `{ply, move, hash}`. Every client applies the same move to its own engine and compares the state fingerprint — any divergence triggers a resync (the full move list is replayed). This is how RTS games and emulators stay in sync with tiny bandwidth.
+Only **moves** cross the network. The room host validates each move with the engine, applies it with that move's dice, and broadcasts `{ply, move, dice, hash}`. Every client re-checks the move and the dice, applies it to its own engine and compares the state fingerprint. A late joiner (or a client that fell behind) gets the whole move list and replays it — verifying every move, every dice value and every fingerprint; a list that rewrites already-played moves is refused. This is how RTS games and emulators stay in sync with tiny bandwidth.
 
 ### Fair dice (`fair-seed.ts`)
 
-1. Each player sends `SHA-256(nonce)` (commit).
-2. When both commits are in, both reveal their nonces.
-3. Everyone verifies, then `seed = SHA-256(nonceX | nonceO)`.
+Two requirements: nobody may *choose* the randomness, and nobody may *know* a move's randomness before that move is fixed (or they could pick moves whose Observe/collapse outcomes favour them).
 
-The host can't grind seeds (it commits before seeing the guest's nonce), and clients verify the ceremony themselves. SHA-256 is implemented in plain TS (`sha256.ts`) because `crypto.subtle` is missing on plain-http LAN pages.
+1. At the start each player picks a secret `s` and builds a hash chain `c₀ = s, cᵢ₊₁ = SHA-256(cᵢ)` up to `c₆₄`, and sends only the **anchor** `c₆₄`.
+2. For move number `p`, a player's value is `c₆₃₋ₚ` — it hashes to the anchor in `p + 1` steps, so anyone can verify it, but nobody can compute it before it is revealed (that would mean inverting SHA-256).
+3. The mover sends their value with the move. If the move rolls dice (`needsDice`: an Observe, or a collapse it triggers), the host then asks the *other* player for theirs — only now, when the move can no longer change. A client only answers for the actual next move, and only once.
+4. The dice for that move are seeded by `SHA-256(game, p, valueX, valueO)`.
+
+What each party can still do: refuse to answer (the host forfeits a connected player who stalls), or — for a peer-to-peer host, which is also the referee — stall or abort the game, or claim a resignation/abandonment that didn't happen (clients flag such claims in the chat). What nobody can do: pick, predict or rewrite dice, or rewrite history; every client verifies everything. SHA-256 is implemented in plain TS (`sha256.ts`) because `crypto.subtle` is missing on plain-http LAN pages.
 
 ### One referee, three transports
 
@@ -115,9 +118,10 @@ On the client side everything becomes a `Channel` (`channel.ts`), so `RoomClient
 ### Robustness
 
 - Every incoming message is shape-checked; moves are rebuilt field by field (`sanitizeMove`) and re-validated by the engine.
-- Chat/emotes are rate-limited; names and text are cleaned; rooms cap their membership.
+- Every connection is rate-limited (token bucket: bursts of 40, 8 messages/s; floods are dropped, then disconnected); chat/emotes have a tighter limit; names and text are cleaned (including invisible and bidirectional-override characters); rooms cap their membership and forget members who left without a seat.
+- A seat whose player has left can be taken by anyone present (between games); a room whose owner left passes ownership to someone present — or to the next person who arrives.
 - Reconnects: the host hands each member a secret token; presenting it later reclaims the seat. A seated player who stays away too long forfeits.
-- The server limits connections and rooms per IP, caps message size, pings sockets to drop dead ones, and closes empty rooms.
+- The server limits connections, rooms and failed room-code guesses per IP, caps message size, rejects malformed URLs with 400 (instead of crashing), pings sockets to drop dead ones, and closes empty rooms.
 
 ## 5. The server (`server/main.ts`)
 
@@ -131,4 +135,4 @@ A lesson is data: a list of steps with coach text, an optional spotlight selecto
 
 - `engine.test.ts` — gate unitarity, superposition amplitudes, entanglement statistics, the Mach–Zehnder and N00N formulas, crowded/full collapses, 300 random games (norm = 1, equal token counts, termination), determinism.
 - `ai.test.ts` — takes wins, stops certain losses, never loses classic tic-tac-toe, speed.
-- `room.test.ts` — the whole room protocol with scripted fake clients: seating, the seed ceremony (and a cheater), illegal/stale/out-of-turn moves, reconnect tokens, resignation, rematch seat swap, late spectators, abandonment, chat limits.
+- `room.test.ts` — the whole room protocol with scripted fake clients: seating, hash-chain dice (secrecy until a move resolves, cheating and stalling players), illegal/stale/out-of-turn moves, reconnect tokens, resignation, rematch seat swap, late spectators, abandonment, seats of departed players, ghost members, chat limits and floods — plus a real `RoomClient` facing a malicious host (early reveal requests, rewritten history, forged dice, bogus forced results).

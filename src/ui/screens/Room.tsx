@@ -265,6 +265,11 @@ function Lobby({ session }: { session: Session }) {
                     Sit here
                   </button>
                 )}
+                {m && !m.connected && m.id !== me && !seeding && (
+                  <button class="btn small" onClick={() => c.sit(seat)} data-tip={`${m.name} has left — take over this seat`}>
+                    Take seat
+                  </button>
+                )}
                 {m?.id === me && !seeding && (
                   <button class="btn small ghost" onClick={() => c.sit(null)}>
                     Watch instead
@@ -277,8 +282,9 @@ function Lobby({ session }: { session: Session }) {
         {seeding ? (
           <p class="seed-note">
             <span class="dots"><i /><i /><i /></span>
-            {c.seeding.value ?? 'Starting…'} Both players commit to secret random numbers, then reveal them — so
-            neither side controls the <Term k="collapse">collapses</Term>.
+            {c.seeding.value ?? 'Starting…'} Each player locks in a secret chain of random numbers. The dice of every
+            move combine one fresh number from each player, revealed only after the move is made — so nobody can
+            steer or predict a <Term k="collapse">collapse</Term>.
           </p>
         ) : owner ? (
           <button class="btn primary big" disabled={!bothReady} onClick={() => c.start()}>

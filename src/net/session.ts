@@ -94,10 +94,28 @@ export async function createRoom(backend: Backend, settings: RoomSettings, name:
   throw new Error('Could not find a free room code — try again.');
 }
 
+/**
+ * Joins in flight, by backend and code. A screen can ask to join the same
+ * room several times in quick succession (e.g. while it is still looking for
+ * a lobby server); all of those callers share one connection attempt instead
+ * of racing each other into the room as "duplicates".
+ */
+const joining = new Map<string, Promise<Session>>();
+
 /** Join an existing room by code. */
-export async function joinRoom(backend: Backend, code: string, name: string, serverBase?: string): Promise<Session> {
+export function joinRoom(backend: Backend, code: string, name: string, serverBase?: string): Promise<Session> {
   const existing = activeSession.value;
-  if (existing && existing.backend === backend && existing.code === code) return existing;
+  if (existing && existing.backend === backend && existing.code === code) return Promise.resolve(existing);
+  const key = `${backend}:${code}`;
+  let pending = joining.get(key);
+  if (!pending) {
+    pending = connectTo(backend, code, name, serverBase).finally(() => joining.delete(key));
+    joining.set(key, pending);
+  }
+  return pending;
+}
+
+async function connectTo(backend: Backend, code: string, name: string, serverBase?: string): Promise<Session> {
   let open: () => Promise<Channel>;
   if (backend === 'srv') {
     if (!serverBase) throw new Error('No lobby server available.');
