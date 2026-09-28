@@ -135,4 +135,6 @@ A lesson is data: a list of steps with coach text, an optional spotlight selecto
 
 - `engine.test.ts` — gate unitarity, superposition amplitudes, entanglement statistics, the Mach–Zehnder and N00N formulas, crowded/full collapses, 300 random games (norm = 1, equal token counts, termination), determinism.
 - `ai.test.ts` — takes wins, stops certain losses, never loses classic tic-tac-toe, speed.
+- `server.test.ts` — the lobby server as a real process: malformed URLs, path traversal, WebSocket origins.
+- `controller.test.ts` — undo against the bot, releasing animation waiters on dispose.
 - `room.test.ts` — the whole room protocol with scripted fake clients: seating, hash-chain dice (secrecy until a move resolves, cheating and stalling players), illegal/stale/out-of-turn moves, reconnect tokens, resignation, rematch seat swap, late spectators, abandonment, seats of departed players, ghost members, chat limits and floods — plus a real `RoomClient` facing a malicious host (early reveal requests, rewritten history, forged dice, bogus forced results).

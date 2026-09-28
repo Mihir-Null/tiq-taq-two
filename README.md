@@ -18,7 +18,7 @@ Play against a bot, pass-and-play, run guided lessons, or play friends online th
 - [Project tour](#project-tour)
 - [Deploying](#deploying)
 - [Ideas to tinker with](#ideas-to-tinker-with)
-- Deeper docs: [PHYSICS.md](docs/PHYSICS.md) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [DEPLOY.md](docs/DEPLOY.md)
+- Deeper docs: [PHYSICS.md](docs/PHYSICS.md) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [DEPLOY.md](docs/DEPLOY.md) · [REVIEW.md](docs/REVIEW.md) (what the pre-release reviews found)
 
 ## Quick start
 
@@ -28,7 +28,7 @@ Requires **Node ≥ 22.18** (the server runs TypeScript directly — no compile 
 npm install
 npm run dev          # the app at http://localhost:5173 (hot reload)
 npm run server:dev   # optional, in a 2nd terminal: lobby server on :8787
-npm test             # engine, bot and room-protocol tests
+npm test             # engine, bot, room-protocol, server and controller tests
 ```
 
 `npm run dev` proxies `/api` and `/ws` to the lobby server, so with both running you get server rooms in development too. Without the server, peer-to-peer rooms, the bot, lessons and the sandbox all still work.
