@@ -4,8 +4,8 @@
 
 import { useEffect, useRef } from 'preact/hooks';
 import {
-  verdictOf, linesOf, LINES, boardString, moveSentence, moveNotation, eventSentence, phaseDegrees, abs,
-  X, O, EMPTY, type Universe, type Complex, type QState, type Player,
+  verdictOf, linesOf, LINES, boardString, moveSentence, moveNotation, eventSentence, phaseDegrees, abs, squareName,
+  X, O, EMPTY, type Universe, type Complex, type QState, type Player, type MovePreview,
 } from '../../engine/index.ts';
 import { settings } from '../../app/store.ts';
 import type { GameController } from '../game/controller.ts';
@@ -59,7 +59,7 @@ function UniverseCard({
       onFocus={() => !vanished && (ctrl.peek.value = u.code)}
       onBlur={() => (ctrl.peek.value = null)}
       onClick={() => !vanished && (ctrl.pinned.value = pinned ? null : u.code)}
-      data-tip={vanished ? 'This universe disappears' : `Universe ${boardString(u.code)} · ${pct(u.p)} likely. Tap to show it on the board.`}
+      data-tip={vanished ? 'This board cancels out: the move removes this universe' : `One possible board · ${pct(u.p)} likely. Hover or tap to see it on the big board.`}
       aria-label={`Universe with probability ${pct(u.p)}`}
     >
       <MiniBoard code={u.code} size={58} highlight={winCells(u.code)} />
@@ -81,12 +81,36 @@ function UniverseCard({
   );
 }
 
+/**
+ * What the preview does to the list of universes, in words. Only a Merge can be
+ * compared board-for-board (it moves tokens without adding any); every other
+ * move changes every universe, so "this card is new" would be misleading.
+ */
+function lineageNote(pv: MovePreview, before: number, after: number): string | null {
+  switch (pv.move.kind) {
+    case 'place':
+      return 'Every universe gets the new token.';
+    case 'split':
+      return `Every universe splits in two — one with the token on ${squareName(pv.move.a)}, one with it on ${squareName(pv.move.b)}.`;
+    case 'link':
+      return after > before
+        ? 'Every universe gets the new token; where the opponent may be, it splits in two (X–O or O–X).'
+        : 'Every universe gets the new token, half-swapped with the other square.';
+    case 'observe':
+      return 'Observing picks one outcome; universes that disagree with it vanish.';
+    case 'merge':
+      return null;
+  }
+}
+
 export function Multiverse({ ctrl }: { ctrl: GameController }) {
   const display = ctrl.display.value;
   const pv = ctrl.viewPly.value === null && !ctrl.anim.value ? ctrl.preview.value : null;
   const q = pv ? pv.q : display.q;
   const list = q.byProbability();
-  const vanished = pv ? display.q.byProbability().filter((u) => q.prob(u.code) < 1e-12) : [];
+  const comparable = pv?.move.kind === 'merge';
+  const vanished = comparable ? display.q.byProbability().filter((u) => q.prob(u.code) < 1e-12) : [];
+  const note = pv ? lineageNote(pv, display.q.size, q.size) : null;
   const showPhase = settings.value.physicsView || display.rules.level >= 3;
   const MAX = 24;
   const rest = list.slice(MAX);
@@ -100,6 +124,7 @@ export function Multiverse({ ctrl }: { ctrl: GameController }) {
           </strong>
           {pv && <span class="badge">after this move</span>}
         </div>
+        {note && <p class="small mv-note">{note}</p>}
         <p class="muted small">
           Each card is one ordinary board the game could turn out to be. Every move acts on all of them at once; a{' '}
           <Term k="collapse" /> makes one real. Hover a card to see it on the board.
@@ -107,7 +132,7 @@ export function Multiverse({ ctrl }: { ctrl: GameController }) {
       </div>
       <div class="mv-grid">
         {list.slice(0, MAX).map((u) => (
-          <UniverseCard key={u.code} ctrl={ctrl} u={u} before={pv ? display.q.prob(u.code) : null} showPhase={showPhase} />
+          <UniverseCard key={u.code} ctrl={ctrl} u={u} before={comparable ? display.q.prob(u.code) : null} showPhase={showPhase} />
         ))}
         {vanished.slice(0, 8).map((u) => (
           <UniverseCard key={`gone${u.code}`} ctrl={ctrl} u={u} before={null} vanished showPhase={false} />
@@ -137,16 +162,15 @@ export function HistoryPanel({ ctrl }: { ctrl: GameController }) {
     <div class="history">
       <div class="hist-controls">
         <button class="icon-btn" onClick={() => ctrl.setViewPly(0)} disabled={active === 0} data-tip="Start position" aria-label="Start position">
-          <Icon name="chevronLeft" size={16} />
-          <Icon name="chevronLeft" size={16} />
+          <Icon name="skipBack" size={18} />
         </button>
-        <button class="icon-btn" onClick={() => ctrl.step(-1)} disabled={active === 0} data-tip="One move back  [←]" aria-label="Back">
+        <button class="icon-btn" onClick={() => ctrl.step(-1)} disabled={active === 0} data-tip="One move back · key ←" aria-label="Back">
           <Icon name="chevronLeft" size={18} />
         </button>
         <span class="hist-pos">
           {active === last ? 'Live' : `Move ${active} / ${last}`}
         </span>
-        <button class="icon-btn" onClick={() => ctrl.step(1)} disabled={view === null} data-tip="One move forward  [→]" aria-label="Forward">
+        <button class="icon-btn" onClick={() => ctrl.step(1)} disabled={view === null} data-tip="One move forward · key →" aria-label="Forward">
           <Icon name="chevronRight" size={18} />
         </button>
         <button class={`btn small ${view === null ? 'ghost' : 'primary'}`} onClick={() => ctrl.setViewPly(null)} disabled={view === null}>

@@ -29,7 +29,8 @@ html[data-theme='academia'] .cell-bg.last { fill: rgba(154, 116, 36, 0.08); }
 .board:not(.can-act) .cell-hit { cursor: default; }
 .cell-hit:focus-visible { stroke: var(--accent); stroke-width: 3; }
 
-.cell-num { fill: var(--text-faint); font-size: 11px; font-family: var(--font-mono); pointer-events: none; opacity: 0.8; }
+/* Square numbers: the lessons refer to them, so they must be readable (≥ 4.5:1). */
+.cell-num { fill: var(--text-dim); font-size: 12px; font-weight: 600; font-family: var(--font-mono); pointer-events: none; }
 
 /* Tokens: each square has an X slot and an O slot whose size/opacity follow the odds. */
 .slot { transition: transform var(--t-med) var(--ease), opacity var(--t-med) var(--ease); pointer-events: none; }
@@ -99,7 +100,6 @@ html[data-theme='lab'] .win-o { filter: var(--glow-o); }
 /* Preview & peek styles */
 .board.is-preview .board-bg { stroke: var(--accent); stroke-dasharray: 10 7; stroke-width: 2; }
 .board.is-peek .board-bg { stroke: var(--energy); stroke-width: 2.5; }
-.board.is-peek .slot { opacity: 1 !important; }
 .board-chip {
   position: absolute;
   top: -10px;
@@ -117,6 +117,7 @@ html[data-theme='lab'] .win-o { filter: var(--glow-o); }
 }
 .chip-preview { background: var(--accent); color: var(--bg-deep); }
 .chip-peek { background: var(--energy); color: var(--bg-deep); }
+.board-chip.pinned { pointer-events: auto; cursor: pointer; border: 0; font-family: inherit; }
 html[data-theme='academia'] .chip-preview, html[data-theme='academia'] .chip-peek { color: #fbf6ea; }
 
 .board-tip {
@@ -135,6 +136,7 @@ html[data-theme='academia'] .chip-preview, html[data-theme='academia'] .chip-pee
   font-family: var(--font-ui);
 }
 .board-tip strong { display: block; }
+.board-tip.below { transform: translate(-50%, 0); }
 
 /* Messages over the board */
 .flash {

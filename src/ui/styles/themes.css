@@ -46,6 +46,8 @@ html[data-theme='lab'] {
   --good: #9ed072;
   --bad: #fc5d7c;
   --empty: #7f8490;
+  /* "no line" slices of the collapse wheel: must stand out from the card */
+  --slice-none: #6f7484;
 
   --board-bg: #26282e;
   --grid: #5b6070;
@@ -96,6 +98,7 @@ html[data-theme='academia'] {
   --good: #4b7536;
   --bad: #9b2226;
   --empty: #9d8d73;
+  --slice-none: #cdbd98;
 
   --board-bg: #f6efdf;
   --grid: #3b2f25;

@@ -14,6 +14,8 @@ import { OnlineHub } from '../ui/screens/Online.tsx';
 import { RoomScreen } from '../ui/screens/Room.tsx';
 import { SettingsModal } from '../ui/screens/Settings.tsx';
 import { activeSession } from '../net/session.ts';
+import { TermCard, closeTermCard } from '../ui/components/Term.tsx';
+import { useEffect } from 'preact/hooks';
 
 function Header() {
   const first = route.value.parts[0] ?? '';
@@ -73,6 +75,8 @@ function Header() {
 
 function Screen() {
   const r = route.value;
+  // A glossary card belongs to the page it was opened on.
+  useEffect(() => closeTermCard(), [r]);
   const [first, second, third] = r.parts;
   switch (first) {
     case undefined:
@@ -115,6 +119,7 @@ export function App() {
           </div>
         ))}
       </div>
+      <TermCard />
     </>
   );
 }

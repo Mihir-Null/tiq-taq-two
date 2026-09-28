@@ -6,7 +6,7 @@
 import { signal, effect } from '@preact/signals';
 import { applyMove, type Move, type Player } from '../engine/index.ts';
 import { GameController, type Driver, type SeatInfo } from '../ui/game/controller.ts';
-import { animScale, updateProgress } from '../app/store.ts';
+import { animScale, progress, updateProgress } from '../app/store.ts';
 import type { Lesson, LessonStep } from './lessons.tsx';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -18,6 +18,8 @@ export class LessonRunner {
   /** True while the lesson itself is playing moves. */
   readonly busy = signal(false);
   readonly finished = signal(false);
+  /** The level this lesson unlocked just now (null if it was already open). */
+  readonly unlockedNow = signal<number | null>(null);
   #rolls: number[] = [];
   #epoch = 0;
   #advancing = false;
@@ -88,9 +90,11 @@ export class LessonRunner {
       c.selection.value = [];
     }
     c.highlight.value = st.cells ?? [];
+    c.pinned.value = null; // a universe pinned in an earlier step shouldn't linger
     this.#rolls = [...(st.rolls ?? [])];
     if (st.auto?.length) {
       this.busy.value = true;
+      c.note.value = `${this.lesson.opponent} is moving…`;
       for (const m of st.auto) {
         await c.whenIdle();
         await sleep(700 * animScale.value + 150);
@@ -101,6 +105,9 @@ export class LessonRunner {
       if (epoch !== this.#epoch) return;
       this.busy.value = false;
     }
+    // What the "waiting" card says while it isn't the learner's move.
+    const reading = !st.expect || st.expect.kind === 'next';
+    c.note.value = reading ? 'Read the coach’s note, then press Next.' : 'Follow the coach’s note.';
   }
 
   /** Go to the next step (after animations settle). */
@@ -136,6 +143,9 @@ export class LessonRunner {
     }
     if (!exp.match(m, this.ctrl.live.value)) {
       this.ctrl.say(exp.hint, true);
+      // Put the attempt back on the board (commit cleared it), so the learner
+      // can adjust it — e.g. keep the merge lab open and just turn the knob.
+      this.ctrl.showMove(m);
       return;
     }
     this.#apply(m);
@@ -145,7 +155,9 @@ export class LessonRunner {
   #finish(): void {
     this.finished.value = true;
     this.ctrl.highlight.value = [];
+    this.ctrl.note.value = null;
     const l = this.lesson;
+    this.unlockedNow.value = l.unlocks > progress.value.unlocked ? l.unlocks : null;
     updateProgress((p) => ({
       ...p,
       lessons: { ...p.lessons, [l.id]: true },

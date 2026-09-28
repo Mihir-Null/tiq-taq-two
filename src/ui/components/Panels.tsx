@@ -19,8 +19,18 @@ export function TokenMark({ p, size = 22 }: { p: Player; size?: number }) {
 
 export function Quanta({ n, max, player }: { n: number; max: number; player?: Player }) {
   if (max <= 0) return null;
+  const tip = `⚡ quanta left: ${n} of ${max}. Observe and Merge cost ⚡1 each.`;
+  // Many pips would squeeze the player's name: show a count instead.
+  if (max > 3) {
+    return (
+      <span class={`quanta compact ${n > 0 ? 'has' : ''}`} data-tip={tip} aria-label={`${n} quanta left`}>
+        <Icon name="bolt" size={13} />
+        {n}
+      </span>
+    );
+  }
   return (
-    <span class="quanta" data-tip={`⚡ quanta left: ${n} of ${max}. Observe and Merge cost ⚡1 each.`} aria-label={`${n} quanta left`}>
+    <span class="quanta" data-tip={tip} aria-label={`${n} quanta left`}>
       {Array.from({ length: max }, (_, i) => (
         <span key={i} class={`pip ${i < n ? 'full' : ''} ${player === X ? 'pip-x' : 'pip-o'}`}>
           <Icon name="bolt" size={13} />
@@ -32,7 +42,8 @@ export function Quanta({ n, max, player }: { n: number; max: number; player?: Pl
 
 export function PlayerBar({ ctrl }: { ctrl: GameController }) {
   // `display` hides the result until collapse animations have finished.
-  const s = ctrl.viewPly.value === null ? { ...ctrl.live.value, result: ctrl.display.value.result } : ctrl.display.value;
+  const past = ctrl.viewPly.value !== null;
+  const s = past ? ctrl.display.value : { ...ctrl.live.value, result: ctrl.display.value.result };
   const seats = ctrl.seats.value;
   const bothLocal = seats[X].local && seats[O].local;
   return (
@@ -44,7 +55,7 @@ export function PlayerBar({ ctrl }: { ctrl: GameController }) {
         const status = s.result
           ? s.result.winner === p ? 'Winner' : s.result.winner === null ? 'Draw' : ''
           : active
-            ? thinking ? 'Thinking…' : seat.local ? (bothLocal ? 'To move' : 'Your turn') : 'To move'
+            ? thinking ? 'Thinking…' : seat.local && !bothLocal && !past ? 'Your turn' : 'To move'
             : '';
         return (
           <div key={p} class={`player ${p === X ? 'player-x' : 'player-o'} ${active ? 'active' : ''} ${s.result?.winner === p ? 'winner' : ''}`}>
@@ -83,7 +94,8 @@ export function ToolPalette({ ctrl }: { ctrl: GameController }) {
   const s = ctrl.live.value;
   const current = ctrl.tool.value;
   const left = quantaOf(s, s.toMove);
-  if (tools.length <= 1) return null;
+  // No tools for a single-tool level, a finished game, or someone just watching.
+  if (tools.length <= 1 || s.result || !ctrl.hasLocalPlayer.value) return null;
   return (
     <div class="tools" role="toolbar" aria-label="Move type">
       {tools.map((t) => {
@@ -96,7 +108,7 @@ export function ToolPalette({ ctrl }: { ctrl: GameController }) {
             class={`tool tool-${t} ${current === t ? 'on' : ''}`}
             aria-pressed={current === t}
             disabled={broke && ctrl.myTurn.value}
-            data-tip={`${info.desc}  [${info.key}]`}
+            data-tip={`${info.desc} · key ${info.key}`}
             onClick={() => ctrl.setTool(t)}
           >
             <Icon name={info.icon} size={22} />

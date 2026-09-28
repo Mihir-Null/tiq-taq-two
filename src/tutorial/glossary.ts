@@ -59,7 +59,7 @@ export const GLOSSARY: GlossaryEntry[] = [
     id: 'collapse',
     term: 'Collapse',
     short: 'The whole board is observed: one universe becomes the only one.',
-    game: 'Happens automatically when no square is empty in every universe (e.g. a full board), or when every universe already contains a finished line.',
+    game: 'Happens automatically when no square is empty in every universe (e.g. a full board), or when every universe already contains a finished line but they disagree about who won. (If they all agree, the game just ends — no dice needed.)',
     physics: 'Measuring every qutrit at once. The outcome is random with Born-rule probabilities; the superposition is gone afterwards.',
   },
   {

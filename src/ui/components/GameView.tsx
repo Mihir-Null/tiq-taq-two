@@ -21,7 +21,6 @@ import { Multiverse, HistoryPanel, PhysicsPanel } from './SidePanels.tsx';
 import { AnimOverlay, ResultBanner } from './Overlays.tsx';
 import { HintsPanel, CoachTip } from './Assist.tsx';
 import { Icon } from './Icon.tsx';
-import { settings } from '../../app/store.ts';
 
 export interface ExtraTab {
   id: string;
@@ -70,7 +69,7 @@ function useKeyboard(ctrl: GameController, enabled: boolean): void {
       else if (k === 'h') void ctrl.requestHints();
       else if (k === 'arrowleft') ctrl.step(-1);
       else if (k === 'arrowright') ctrl.step(1);
-      else if ((k === 'u' || k === 'backspace') && ctrl.undoAllowed.value) ctrl.driver.undo?.(ctrl);
+      else if ((k === 'u' || k === 'backspace') && ctrl.canUndo.value) ctrl.driver.undo?.(ctrl);
       else return;
       e.preventDefault();
     };
@@ -79,17 +78,53 @@ function useKeyboard(ctrl: GameController, enabled: boolean): void {
   }, [ctrl, enabled]);
 }
 
+/**
+ * Phones only (CSS hides it elsewhere): the move you're building, with Play /
+ * Cancel — and the knob for a Merge — pinned just above the tool bar, so you
+ * never have to scroll away from the board to confirm.
+ */
+function MoveBar({ ctrl }: { ctrl: GameController }) {
+  const merge = ctrl.tool.value === 'merge' && ctrl.selection.value.length === 2;
+  const ready = ctrl.readyToConfirm.value;
+  if (!ctrl.canAct.value || (!ready && !merge)) return null;
+  const ex = ctrl.explanation.value;
+  // A warning ("the board will collapse…") matters more than the headline.
+  const warning = ex?.warnings[0];
+  return (
+    <div class="move-bar" role="group" aria-label="Confirm your move">
+      <span class={`move-bar-text ${warning ? 'warn' : ''}`}>
+        {warning ? <><Icon name="info" size={13} /> {warning}</> : ex?.headline ?? ctrl.candidateError.value ?? ''}
+      </span>
+      <button class="btn ghost small" onClick={() => ctrl.clearSelection()}>
+        Cancel
+      </button>
+      {merge && (
+        <span class="move-bar-knob">
+          <button class="icon-btn" onClick={() => ctrl.setKnob(ctrl.knob.value - 1)} aria-label="Turn the knob back">
+            <Icon name="undo" size={18} />
+          </button>
+          Knob <strong>{ctrl.knob.value * 90}°</strong>
+          <button class="icon-btn" onClick={() => ctrl.setKnob(ctrl.knob.value + 1)} aria-label="Turn the knob forward">
+            <Icon name="redo" size={18} />
+          </button>
+        </span>
+      )}
+      <button class="btn primary small" disabled={!ready} onClick={() => ctrl.confirm()}>
+        <Icon name="check" size={16} /> Play
+      </button>
+    </div>
+  );
+}
+
 export function GameView({ ctrl, actions, resultActions, extraTabs = [], banner, coach, tips = true, keyboard = true }: Props) {
   const [tab, setTab] = useState<string>('mv');
   useKeyboard(ctrl, keyboard);
   const flash = ctrl.flash.value;
   const view = ctrl.viewPly.value;
-  const physics = settings.value.physicsView || ctrl.live.value.rules.level >= 3;
-
   const tabs: ExtraTab[] = [
     { id: 'mv', label: 'Multiverse', icon: 'layers', render: () => <Multiverse ctrl={ctrl} /> },
     { id: 'hist', label: 'History', icon: 'history', render: () => <HistoryPanel ctrl={ctrl} /> },
-    { id: 'phys', label: physics ? 'Physics' : 'Math', icon: 'atom', render: () => <PhysicsPanel ctrl={ctrl} /> },
+    { id: 'phys', label: 'Physics', icon: 'atom', render: () => <PhysicsPanel ctrl={ctrl} /> },
     ...extraTabs,
   ];
   const active = tabs.find((t) => t.id === tab) ?? tabs[0];
@@ -129,6 +164,7 @@ export function GameView({ ctrl, actions, resultActions, extraTabs = [], banner,
       <section class="gl-controls">
         <ResultBanner ctrl={ctrl}>{resultActions}</ResultBanner>
         <ToolPalette ctrl={ctrl} />
+        <MoveBar ctrl={ctrl} />
         <PreviewCard ctrl={ctrl} />
         <HintsPanel ctrl={ctrl} />
         {tips && <CoachTip ctrl={ctrl} />}
@@ -136,9 +172,17 @@ export function GameView({ ctrl, actions, resultActions, extraTabs = [], banner,
       </section>
 
       <section class="gl-side">
-        <div class="tabs" role="tablist">
+        <div class={`tabs ${tabs.length > 3 ? 'many' : ''}`} role="tablist">
           {tabs.map((t) => (
-            <button key={t.id} role="tab" aria-selected={t.id === active.id} class={`tab ${t.id === active.id ? 'on' : ''}`} onClick={() => setTab(t.id)}>
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={t.id === active.id}
+              aria-label={t.label}
+              data-tip={tabs.length > 3 && t.id !== active.id ? t.label : undefined}
+              class={`tab ${t.id === active.id ? 'on' : ''}`}
+              onClick={() => setTab(t.id)}
+            >
               <Icon name={t.icon} size={16} />
               <span>{t.label}</span>
               {t.badge ? <span class="tab-badge">{t.badge}</span> : null}

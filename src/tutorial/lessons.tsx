@@ -28,6 +28,8 @@ export interface LessonStep {
   text: () => JSX.Element;
   /** CSS selector of something to spotlight. */
   spot?: string;
+  /** Spotlight on phones instead (where the screen can't show everything at once); 'none' for no spotlight. */
+  spotPhone?: string;
   /** Board squares to highlight. */
   cells?: number[];
   expect?: Expect;
@@ -146,7 +148,7 @@ export const LESSONS: Lesson[] = [
       {
         text: () => (
           <>
-            Tap ① and then ③ (or drag from ① to ③). Your X will be in <strong>both</strong>.
+            Tap ① and then ③ (with a mouse you can also drag from ① to ③). Your X will be in <strong>both</strong>.
           </>
         ),
         cells: [0, 2],
@@ -185,9 +187,9 @@ export const LESSONS: Lesson[] = [
         title: '2 × 2 = 4 universes',
         text: () => (
           <>
-            Each split doubles the universes. The coloured bar along the left column shows that X would complete it in
-            25% of universes — the ones with X on both ① and ⑦. A line in only <em>some</em> universes doesn't win
-            yet.
+            Each split doubles the universes: 2 × 2 = 4 (count the Multiverse cards). In one of them X sits on both ①
+            and ⑦ — so an X on ④ would finish the left column <em>in that universe only</em>. A line in just some
+            universes doesn't win: every universe has to agree, or the board has to collapse first.
           </>
         ),
         spot: '.board-area',
@@ -389,11 +391,14 @@ export const LESSONS: Lesson[] = [
         title: 'Turn the knob',
         text: () => (
           <>
-            Turn the knob and watch the chart: the probability sloshes between ④ and ⑥ like a wave. Find the setting
-            where your X lands <strong>100% on ④</strong>, then play it.
+            Turn the knob and watch the preview: the probability sloshes between ④ and ⑥ like a wave (the chart in
+            the move card draws the whole wave). Find the setting where your X lands <strong>100% on ④</strong>, then
+            play it.
           </>
         ),
         spot: '.preview-card',
+        // Phones: the knob sits in the bar above the tools; keep the board undimmed to watch it work.
+        spotPhone: 'none',
         tool: 'merge',
         expect: {
           kind: 'move',
@@ -413,6 +418,7 @@ export const LESSONS: Lesson[] = [
             cancelling is how quantum computers make wrong answers disappear.
           </>
         ),
+        spot: '.board-area',
         nextLabel: 'Finish lesson',
       },
     ],

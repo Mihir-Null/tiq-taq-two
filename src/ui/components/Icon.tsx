@@ -146,6 +146,7 @@ const PATHS: Record<string, JSX.Element> = {
   play: <path d="M7 4.5v15l12-7.5z" />,
   pause: <path d="M7 5h3v14H7zM14 5h3v14h-3z" />,
   skip: <path d="M5 5l8 7-8 7zM15 5v14" />,
+  skipBack: <path d="M19 5l-8 7 8 7zM9 5v14" />,
   close: <path d="M6 6l12 12M18 6L6 18" />,
   check: <path d="M4.5 12.5l5 5 10-11" />,
   chevronRight: <path d="M9 5l7 7-7 7" />,

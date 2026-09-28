@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
 import {
-  verdictOf, squareName, X, O, EMPTY, playerChar, type Cell, type GameResult,
+  verdictOf, squareName, X, O, EMPTY, playerChar, type Cell, type GameResult, type Player,
 } from '../../engine/index.ts';
 import { animScale } from '../../app/store.ts';
 import { sfx } from '../../audio/sfx.ts';
@@ -42,7 +42,7 @@ function MeasureOverlay({ ctrl, anim }: { ctrl: GameController; anim: Extract<An
   const e = anim.event;
   const dist = e.before.cellDist(e.cell);
   const [stage, setStage] = useState(0); // 0 intro, 1 sweep, 2 reveal
-  useTimeline([450, 1300, 1500], anim.id, (i) => {
+  useTimeline([450, 1300, 2200], anim.id, (i) => {
     if (i === 0) setStage(1);
     if (i === 1) {
       setStage(2);
@@ -76,8 +76,8 @@ function MeasureOverlay({ ctrl, anim }: { ctrl: GameController; anim: Extract<An
             It's <strong class={`is-${name(e.outcome)}`}>{name(e.outcome)}</strong>! Universes that disagreed vanish.
           </p>
         )}
-        <button class="btn ghost small" onClick={() => ctrl.finishAnim(anim.id)}>
-          Skip
+        <button class={`btn small ${stage === 2 ? 'primary' : 'ghost'}`} onClick={() => ctrl.finishAnim(anim.id)}>
+          {stage === 2 ? 'Continue' : 'Skip'}
         </button>
       </div>
     </div>
@@ -108,7 +108,7 @@ function CollapseOverlay({ ctrl, anim }: { ctrl: GameController; anim: Extract<A
   const [stage, setStage] = useState(0); // 0 intro, 1 spinning, 2 landed
   const turns = 3;
   const spin = 360 * turns + 360 - e.r * 360; // put the point r·360° under the top pointer
-  useTimeline([700, 2700, 2000], anim.id, (i) => {
+  useTimeline([700, 2700, 3200], anim.id, (i) => {
     if (i === 0) {
       setStage(1);
       for (let k = 0; k < 9; k++) setTimeout(() => sfx.tick(), 120 * k * k * 0.3 * animScale.value);
@@ -183,8 +183,8 @@ function CollapseOverlay({ ctrl, anim }: { ctrl: GameController; anim: Extract<A
             </div>
           </div>
         )}
-        <button class="btn ghost small" onClick={() => ctrl.finishAnim(anim.id)}>
-          Skip
+        <button class={`btn small ${stage === 2 ? 'primary' : 'ghost'}`} onClick={() => ctrl.finishAnim(anim.id)}>
+          {stage === 2 ? 'Continue' : 'Skip'}
         </button>
       </div>
     </div>
@@ -224,20 +224,24 @@ export function AnimOverlay({ ctrl }: { ctrl: GameController }) {
 
 // ─────────────────────────────── Result ────────────────────────────────────
 
-export function describeResult(r: GameResult): string {
+/** One sentence on how the game ended. `names` are the players' names by token. */
+export function describeResult(r: GameResult, names?: Record<Player, string>): string {
+  const loser = r.winner === null ? null : r.winner === X ? O : X;
+  const who = loser === null ? 'A player' : names?.[loser] ?? (loser === X ? 'X' : 'O');
   switch (r.reason) {
     case 'line':
-      return r.code === null
+      if (r.code !== null) return 'Three in a row.';
+      return r.certain
         ? 'Every universe agreed on the winner — no dice were needed.'
-        : 'Three in a row.';
+        : 'After the measurement, every remaining universe agreed on the winner.';
     case 'decided':
       return 'Every universe had a finished line; the collapse chose one of them.';
     case 'full':
       return r.certain ? 'The board filled up.' : 'The board filled up and collapsed — the surviving universe decided it.';
     case 'resign':
-      return 'The opponent resigned.';
+      return `${who} resigned.`;
     case 'abandon':
-      return 'The opponent left the game.';
+      return `${who} left the game (or stopped answering).`;
   }
 }
 
@@ -261,7 +265,7 @@ export function ResultBanner({ ctrl, children }: { ctrl: GameController; childre
       <div class="result-title">
         <Icon name={r.winner === null ? 'flag' : 'crown'} size={22} /> {title}
       </div>
-      <div class="result-sub">{describeResult(r)}</div>
+      <div class="result-sub">{describeResult(r, { [X]: seats[X].name, [O]: seats[O].name })}</div>
       {lines && <div class="result-lines small">{lines}</div>}
       <div class="result-actions">{children}</div>
     </div>

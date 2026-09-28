@@ -173,6 +173,14 @@ html[data-theme='academia'] .codex-card h4 { text-transform: none; font-variant-
 .coach-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .coach-actions .skip { margin-left: auto; }
 .coach-busy { color: var(--text-dim); margin: 6px 0 4px; }
+.coach-tuck { display: none; width: 32px; height: 32px; margin: -4px -6px -4px 0; }
+.coach-tuck .icon { transition: transform var(--t-fast); }
+.coach-card.tucked .coach-tuck .icon { transform: rotate(180deg); }
+@media (max-width: 820px) {
+  .coach-tuck { display: inline-grid; }
+  .coach-card.tucked > :not(.coach-top) { display: none; }
+  .coach-card.tucked .coach-top { margin-bottom: 0; }
+}
 .coach-wait { font-size: 0.86rem; color: var(--energy); font-weight: 600; animation: lesson-pulse 1.6s infinite; }
 
 .spotlight {

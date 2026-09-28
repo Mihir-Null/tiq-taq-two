@@ -61,12 +61,12 @@ export function PreviewCard({ ctrl }: { ctrl: GameController }) {
   }
   if (!ctrl.myTurn.value) {
     const seat = ctrl.seats.value[s.toMove];
+    const note = ctrl.note.value;
+    if (!ctrl.hasLocalPlayer.value) return <div class="card preview-card waiting">You're watching — {seat.name} is to move.</div>;
     return (
       <div class="card preview-card waiting">
-        <span class="dots" aria-hidden="true"><i /><i /><i /></span>
-        <span>
-          {seat.kind === 'bot' ? `${seat.name} is thinking…` : `Waiting for ${seat.name}…`}
-        </span>
+        {!note && <span class="dots" aria-hidden="true"><i /><i /><i /></span>}
+        <span>{note ?? (seat.kind === 'bot' ? `${seat.name} is thinking…` : `Waiting for ${seat.name}…`)}</span>
       </div>
     );
   }
@@ -132,7 +132,7 @@ export function PreviewCard({ ctrl }: { ctrl: GameController }) {
                 </button>
               </>
             ) : (
-              <span class="muted small">Click to play this move.</span>
+              <span class="muted small">Click the square to play this move.</span>
             )}
           </div>
         </>
@@ -168,7 +168,7 @@ export function Knob({ ctrl }: { ctrl: GameController }) {
   const angle = k * 90;
   return (
     <div class="knob-row">
-      <button class="icon-btn" onClick={() => ctrl.setKnob(k - 1)} aria-label="Turn knob back" data-tip="Turn the knob back a quarter turn  [ [ ]">
+      <button class="icon-btn" onClick={() => ctrl.setKnob(k - 1)} aria-label="Turn knob back" data-tip="Turn the knob back a quarter turn · key [">
         <Icon name="undo" size={18} />
       </button>
       <svg class="knob" viewBox="-54 -54 108 108" width="100" height="100" role="slider" aria-valuenow={angle} aria-valuemin={0} aria-valuemax={270} aria-label="Phase knob">
@@ -189,7 +189,7 @@ export function Knob({ ctrl }: { ctrl: GameController }) {
           <circle r="5" />
         </g>
       </svg>
-      <button class="icon-btn" onClick={() => ctrl.setKnob(k + 1)} aria-label="Turn knob forward" data-tip="Turn the knob forward a quarter turn  [ ] ]">
+      <button class="icon-btn" onClick={() => ctrl.setKnob(k + 1)} aria-label="Turn knob forward" data-tip="Turn the knob forward a quarter turn · key ]">
         <Icon name="redo" size={18} />
       </button>
       <div class="knob-label">

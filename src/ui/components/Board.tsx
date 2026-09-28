@@ -18,7 +18,7 @@
 import { useRef, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
 import {
-  correlations, lineOdds, linesOf, cellOf, squareName, LINES, X, O, EMPTY, CERTAIN_EPS,
+  correlations, lineOdds, linesOf, cellOf, squareName, LINES, LINE_NAMES, X, O, EMPTY, CERTAIN_EPS,
   type QState, type Correlation, type Player, type Move, moveCells,
 } from '../../engine/index.ts';
 import { settings } from '../../app/store.ts';
@@ -148,7 +148,25 @@ function curve(a: number, b: number, bow = 0.18): { d: string; mx: number; my: n
   // Start/end a little outside the glyphs.
   const s = 30 / len;
   const sx = x1 + dx * s, sy = y1 + dy * s, ex = x2 - dx * s, ey = y2 - dy * s;
-  return { d: `M${sx},${sy} Q${qx},${qy} ${ex},${ey}`, mx: 0.25 * sx + 0.5 * qx + 0.25 * ex, my: 0.25 * sy + 0.5 * qy + 0.25 * ey };
+  // The badge goes where the curve keeps farthest from every square's centre —
+  // over a grid line, not on top of some other square's token and percentage.
+  const at = (t: number): [number, number] => [
+    (1 - t) ** 2 * sx + 2 * (1 - t) * t * qx + t * t * ex,
+    (1 - t) ** 2 * sy + 2 * (1 - t) * t * qy + t * t * ey,
+  ];
+  let best = at(0.5);
+  let bestScore = -Infinity;
+  for (let t = 0.2; t <= 0.8001; t += 0.05) {
+    const [px, py] = at(t);
+    let clear = Infinity;
+    for (let i = 0; i < 9; i++) clear = Math.min(clear, Math.hypot(px - cx(i), py - cy(i)));
+    const score = clear - 20 * Math.abs(t - 0.5); // prefer the middle when it's clear anyway
+    if (score > bestScore) {
+      bestScore = score;
+      best = [px, py];
+    }
+  }
+  return { d: `M${sx},${sy} Q${qx},${qy} ${ex},${ey}`, mx: best[0], my: best[1] };
 }
 
 function Links({ list, onTip }: { list: Correlation[]; onTip: (c: Correlation | null, x?: number, y?: number) => void }) {
@@ -203,9 +221,7 @@ function LineOddsLayer({ q }: { q: QState }) {
           x1={x1 - ux * 34 + nx * off} y1={y1 - uy * 34 + ny * off}
           x2={x2 + ux * 34 + nx * off} y2={y2 + uy * 34 + ny * off}
           style={{ opacity: 0.12 + 0.55 * p, strokeWidth: 3 + 5 * p }}
-        >
-          <title>{`${t === X ? 'X' : 'O'} completes this line in ${pct(p)} of universes`}</title>
-        </line>,
+        />,
       );
     }
   }
@@ -224,6 +240,8 @@ interface TipState {
   y: number;
   lines: string[];
   title: string;
+  /** Open downwards (for squares in the top row). */
+  below: boolean;
 }
 
 export function Board({ ctrl, compact = false, interactive = true }: { ctrl: GameController; compact?: boolean; interactive?: boolean }) {
@@ -307,16 +325,39 @@ export function Board({ ctrl, compact = false, interactive = true }: { ctrl: Gam
         for (const c of links) if (c.a === i || c.b === i) lines.push(...c.statements.slice(0, 1));
       } else if (d[EMPTY] > 0.999) lines.push('Empty in every universe');
       else lines.push('Certain — the same in every universe');
+      // The line-odds bars through this square, in words.
+      if (st.showLineOdds && !result) {
+        const through = lineOdds(q)
+          .filter((o) => LINES[o.line].includes(i) && (o.x >= 0.02 || o.o >= 0.02))
+          .sort((a, b) => Math.max(b.x, b.o) - Math.max(a.x, a.o))
+          .slice(0, 2);
+        for (const o of through) {
+          const who = [o.x >= 0.02 ? `X ${pct(o.x)}` : '', o.o >= 0.02 ? `O ${pct(o.o)}` : ''].filter(Boolean).join(', ');
+          const name = LINE_NAMES[o.line];
+          lines.push(`${name[0].toUpperCase()}${name.slice(1)} completed in ${who} of universes`);
+        }
+      }
     }
-    setTip({ x: ((cx(i) / SIZE) * r.width), y: ((cy(i) - 50) / SIZE) * r.height, title: `Square ${squareName(i)}`, lines });
+    // Top-row tips open below the square, so they don't cover the player bar.
+    const below = i < 3;
+    setTip({
+      x: (cx(i) / SIZE) * r.width,
+      y: ((below ? cy(i) + 50 : cy(i) - 50) / SIZE) * r.height,
+      title: `Square ${squareName(i)}`,
+      lines,
+      below,
+    });
   };
 
   const onLinkTip = (c: Correlation | null, x?: number, y?: number) => {
     if (!c || !wrap.current) return setTip(null);
     const r = wrap.current.getBoundingClientRect();
-    const title = c.kind === 'swap' ? 'Entangled pair' : c.kind === 'tether' ? 'One token, two places' : 'Correlated squares';
-    const lines = [...c.statements.slice(0, 3), `Shared information: ${c.mi.toFixed(2)} bits`];
-    setTip({ x: ((x ?? 0) / SIZE) * r.width, y: (((y ?? 0) - 16) / SIZE) * r.height, title, lines });
+    const title =
+      c.kind === 'swap' ? '⇄ Entangled pair' : c.kind === 'tether' ? '~ One token, two places' : '≈ Linked squares';
+    const lines = [...c.statements.slice(0, 3)];
+    if (c.kind === 'mixed') lines.push('Several moves are tangled up here — look at one square and you learn about the other.');
+    if (st.physicsView) lines.push(`Mutual information: ${c.mi.toFixed(2)} bit${c.mi >= 0.995 && c.mi < 1.005 ? '' : 's'}`);
+    setTip({ x: ((x ?? 0) / SIZE) * r.width, y: (((y ?? 0) - 16) / SIZE) * r.height, title, lines, below: false });
   };
 
   const classes = [
@@ -432,8 +473,11 @@ export function Board({ ctrl, compact = false, interactive = true }: { ctrl: Gam
               const over = cellFromPoint(e.clientX, e.clientY);
               if (over !== null && over !== drag.current.from) {
                 drag.current.moved = true;
-                if (ctrl.selection.value[0] !== drag.current.from && ctrl.canAct.value && tool !== 'place' && tool !== 'observe') {
-                  ctrl.selection.value = [drag.current.from];
+                if (ctrl.selection.value[0] !== drag.current.from && ctrl.canAct.value) {
+                  // Dragging always means a two-square move: switch Place → Split
+                  // right away, so the preview shows what the drop will do.
+                  if ((tool === 'place' || tool === 'observe') && ctrl.tools.value.includes('split')) ctrl.tool.value = 'split';
+                  if (ctrl.tool.value !== 'place' && ctrl.tool.value !== 'observe') ctrl.selection.value = [drag.current.from];
                 }
                 ctrl.hover.value = over;
               }
@@ -469,13 +513,16 @@ export function Board({ ctrl, compact = false, interactive = true }: { ctrl: Gam
       </svg>
 
       {pv && <div class="board-chip chip-preview">Preview</div>}
-      {peeking && (
-        <div class="board-chip chip-peek">
-          Peeking at one universe · {pct(display.q.prob(peekCode!))}
-        </div>
-      )}
+      {peeking &&
+        (ctrl.pinned.value !== null && ctrl.peek.value === null ? (
+          <button class="board-chip chip-peek pinned" onClick={() => (ctrl.pinned.value = null)}>
+            One universe · {pct(display.q.prob(peekCode!))} · show all ✕
+          </button>
+        ) : (
+          <div class="board-chip chip-peek">Peeking at one universe · {pct(display.q.prob(peekCode!))}</div>
+        ))}
       {tip && (
-        <div class="board-tip" style={{ left: `${tip.x}px`, top: `${tip.y}px` }}>
+        <div class={`board-tip ${tip.below ? 'below' : ''}`} style={{ left: `${tip.x}px`, top: `${tip.y}px` }}>
           <strong>{tip.title}</strong>
           {tip.lines.map((l, k) => (
             <div key={k}>{l}</div>
