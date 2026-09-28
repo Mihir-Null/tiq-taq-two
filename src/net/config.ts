@@ -7,6 +7,8 @@
  *   VITE_SERVER_URL     https://tiq.example.com   your Node lobby server
  *                        (if unset, the app checks its own origin — which is
  *                        exactly right when the Node server hosts the app)
+ *   VITE_STATIC_HOST    1   the app is on a static host (e.g. GitHub Pages):
+ *                        don't look for a lobby server at its own address
  *   VITE_DISABLE_P2P    1   hide peer-to-peer rooms
  *   VITE_PEER_HOST / VITE_PEER_PORT / VITE_PEER_PATH / VITE_PEER_SECURE / VITE_PEER_KEY
  *                        use your own PeerJS signalling server instead of
@@ -55,7 +57,12 @@ export function serverCandidates(): string[] {
   const custom = settings.value.customServer?.trim();
   if (custom) out.push(custom.replace(/\/+$/, ''));
   if (env.VITE_SERVER_URL) out.push(String(env.VITE_SERVER_URL).replace(/\/+$/, ''));
-  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) {
+  // The page's own address hosts a lobby when the Node server serves the app.
+  // Static hosts never do — asking would just log a 404.
+  const staticHost =
+    env.VITE_STATIC_HOST === '1' || env.VITE_STATIC_HOST === 'true' ||
+    (typeof location !== 'undefined' && /\.github\.io$/.test(location.hostname));
+  if (!staticHost && typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) {
     out.push(`${location.origin}${location.pathname.replace(/\/[^/]*$/, '')}`.replace(/\/+$/, ''));
   }
   return [...new Set(out)];
