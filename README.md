@@ -1,4 +1,4 @@
-# tiq taq |two⟩
+# tiq taq |2⟩
 
 **▶ Play: [mihir-null.github.io/tiq-taq-two](https://mihir-null.github.io/tiq-taq-two/)** · [source](https://github.com/Mihir-Null/tiq-taq-two)
 
