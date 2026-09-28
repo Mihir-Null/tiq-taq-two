@@ -121,8 +121,12 @@ export const activeTheme = computed<'lab' | 'academia'>(() => {
   return t;
 });
 
+// (The `document` checks let these modules load outside a browser, e.g. in tests.)
+const hasDom = typeof document !== 'undefined';
+
 effect(() => {
   const theme = activeTheme.value;
+  if (!hasDom) return;
   document.documentElement.dataset.theme = theme;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'lab' ? '#2c2e34' : '#efe6d2');
 });
@@ -131,8 +135,11 @@ const prefersReducedMotion = typeof matchMedia !== 'undefined' ? matchMedia('(pr
 export const reducedMotion = computed(() => settings.value.reduceMotion || (prefersReducedMotion?.matches ?? false));
 
 effect(() => {
-  document.documentElement.dataset.motion = reducedMotion.value ? 'reduced' : 'full';
-  document.documentElement.dataset.speed = settings.value.animSpeed;
+  const motion = reducedMotion.value ? 'reduced' : 'full';
+  const speed = settings.value.animSpeed;
+  if (!hasDom) return;
+  document.documentElement.dataset.motion = motion;
+  document.documentElement.dataset.speed = speed;
 });
 
 /** Multiplier for animation durations. */

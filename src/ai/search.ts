@@ -90,6 +90,7 @@ function value(s: GameState, depth: number, ctx: SearchCtx, alpha: number, beta:
   if (hit !== undefined) return hit;
 
   const maximizing = s.toMove === X;
+  const window0: [number, number] = [alpha, beta];
   let best = maximizing ? -Infinity : Infinity;
   let pruned = false;
   for (const m of candidates(s)) {
@@ -106,7 +107,10 @@ function value(s: GameState, depth: number, ctx: SearchCtx, alpha: number, beta:
       break;
     }
   }
-  if (!pruned) ctx.cache.set(key, best); // only exact values are safe to cache
+  // Only exact values are safe to cache. A cut-off (pruned) gives a bound, and
+  // so does a value outside the window we were given (a "fail-low/high": the
+  // true value is at most/at least that, not exactly it).
+  if (!pruned && best > window0[0] && best < window0[1]) ctx.cache.set(key, best);
   return best;
 }
 

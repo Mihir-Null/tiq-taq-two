@@ -412,7 +412,9 @@ function resolve(s: GameState, rng: () => number, events: GameEvent[]): GameStat
           xLines: v.xLines,
           oLines: v.oLines,
           code: q.isClassical ? top.code : null,
-          certain: true,
+          // "Certain" = no dice decided it. An Observe earlier in this same move
+          // did roll dice, even if every surviving universe now agrees.
+          certain: !rolledDice,
           reason: 'line',
         });
       }
@@ -429,6 +431,19 @@ function resolve(s: GameState, rng: () => number, events: GameEvent[]): GameStat
     break;
   }
   return { ...s, q };
+}
+
+/**
+ * Does playing `m` roll any dice — an Observe, or a collapse the move
+ * triggers? (Online, only such moves need both players' random values.)
+ */
+export function needsDice(s: GameState, m: Move): boolean {
+  let rolled = false;
+  applyMove(s, m, () => {
+    rolled = true;
+    return 0.5;
+  });
+  return rolled;
 }
 
 /** End the game because `player` resigned. */

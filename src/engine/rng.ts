@@ -49,6 +49,11 @@ export function seededRng(key: string): () => number {
 /** The random stream used while resolving move number `ply` of a game. */
 export const rngForPly = (seed: string, ply: number): (() => number) => seededRng(`${seed}#${ply}`);
 
+/** For moves that must not roll dice: calling it is a bug, so it says so loudly. */
+export const noDice = (): number => {
+  throw new Error('This move was expected to roll no dice.');
+};
+
 /** A fresh random seed for local games (not security-sensitive). */
 export function randomSeed(): string {
   const bytes = new Uint8Array(12);

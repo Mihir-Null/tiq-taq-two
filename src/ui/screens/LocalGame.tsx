@@ -5,7 +5,7 @@
  * Without enough parameters, a setup form is shown first.
  */
 
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { X, O, LEVELS, ALL_LEVELS, type Level, type Player, type RuleSet } from '../../engine/index.ts';
 import { DIFFICULTY_INFO, type Difficulty } from '../../ai/search.ts';
 import { GameController, LocalDriver, type SeatInfo } from '../game/controller.ts';
@@ -25,13 +25,17 @@ interface Setup {
   quanta: number;
 }
 
+/** Read the game settings from the URL — which anyone can edit, so validate everything. */
 function readSetup(q: URLSearchParams): Setup | null {
   const mode = q.get('mode') as Mode | null;
   const level = Number(q.get('level'));
   if (!mode || !['bot', 'local', 'sandbox'].includes(mode) || !ALL_LEVELS.includes(level as Level)) return null;
-  const difficulty = (q.get('difficulty') as Difficulty) || 'medium';
-  const side = (q.get('side') as Setup['side']) || 'X';
-  const quanta = q.has('quanta') ? Math.max(0, Math.min(9, Number(q.get('quanta')))) : LEVELS[level as Level].defaultQuanta;
+  const d = q.get('difficulty');
+  const difficulty: Difficulty = d === 'easy' || d === 'medium' || d === 'hard' ? d : 'medium';
+  const sd = q.get('side');
+  const side: Setup['side'] = sd === 'O' || sd === 'random' ? sd : 'X';
+  const n = Number(q.get('quanta'));
+  const quanta = q.has('quanta') && Number.isFinite(n) ? Math.max(0, Math.min(9, Math.round(n))) : LEVELS[level as Level].defaultQuanta;
   return { mode, level: level as Level, difficulty, side, quanta };
 }
 
@@ -72,10 +76,13 @@ function LocalGame({ setup }: { setup: Setup }) {
     return () => ctrl.dispose();
   }, [ctrl]);
 
-  // Record stats once per finished game.
+  // Record stats once per game — undoing the final move and finishing again
+  // doesn't count as another game.
   const result = ctrl.live.value.result;
+  const recorded = useRef(false);
   useEffect(() => {
-    if (!result || setup.mode !== 'bot') return;
+    if (!result || setup.mode !== 'bot' || recorded.current) return;
+    recorded.current = true;
     const me = ctrl.seats.value[X].local ? X : O;
     updateProgress((p) => ({
       ...p,
@@ -87,10 +94,11 @@ function LocalGame({ setup }: { setup: Setup }) {
     }));
   }, [result]);
 
-  const rematch = () => {
+  /** A fresh game with the same settings; `swap` also trades sides with the bot. */
+  const again = (swap: boolean) => {
     const qs = new URLSearchParams(route.value.query);
     qs.set('g', String(Date.now()));
-    if (setup.mode === 'bot' && setup.side !== 'random') qs.set('side', setup.side === 'X' ? 'O' : 'X');
+    if (swap && setup.mode === 'bot' && setup.side !== 'random') qs.set('side', setup.side === 'X' ? 'O' : 'X');
     location.hash = `#/play?${qs.toString()}`;
   };
 
@@ -110,17 +118,17 @@ function LocalGame({ setup }: { setup: Setup }) {
         ctrl={ctrl}
         actions={
           <>
-            <button class="btn ghost small" onClick={() => ctrl.driver.undo?.(ctrl)} disabled={ctrl.snapshots.value.length <= 1} data-tip="Take back your last move  [U]">
+            <button class="btn ghost small" onClick={() => ctrl.driver.undo?.(ctrl)} disabled={!ctrl.canUndo.value} data-tip="Take back your last move · key U">
               <Icon name="undo" size={16} /> Undo
             </button>
-            <button class="btn ghost small" onClick={rematch} data-tip="Start over with the same settings">
+            <button class="btn ghost small" onClick={() => again(false)} data-tip="Start over with the same settings and sides">
               <Icon name="restart" size={16} /> Restart
             </button>
           </>
         }
         resultActions={
           <>
-            <button class="btn primary" onClick={rematch}>
+            <button class="btn primary" onClick={() => again(true)}>
               <Icon name="restart" size={16} /> {setup.mode === 'bot' ? 'Rematch (swap sides)' : 'Play again'}
             </button>
             <button class="btn" onClick={() => ctrl.setViewPly(0)}>

@@ -92,8 +92,12 @@ export function explainPreview(s: GameState, pv: MovePreview): Explanation {
         if (cancelled) bits.push(`${cancelled} outcome${cancelled > 1 ? 's' : ''} cancel out`);
         if (boosted) bits.push(`${boosted} reinforce${boosted > 1 ? '' : 's'}`);
         details.push(`Universes meet and interfere: ${bits.join(', ')}.`);
-      } else {
+      } else if (meetings.length === 0) {
         details.push('No universes meet here, so nothing interferes — the squares just half-swap.');
+      } else if (meetings.every((x) => Math.abs(x.actual - x.naive) < x.naive * 0.05)) {
+        details.push("Universes meet, but their arrows are at right angles: they neither cancel nor reinforce, so the odds simply add. Turn the knob to change that.");
+      } else {
+        details.push('Universes meet and partly interfere — some odds shift. Turn the knob to push them further.');
       }
       for (const cell of [m.a, m.b]) {
         const b0 = before.cellDist(cell);
@@ -144,7 +148,9 @@ export function explainPreview(s: GameState, pv: MovePreview): Explanation {
         pv.pending.reason === 'decided'
           ? 'Every universe will contain a finished line → the board collapses and one universe decides the game.'
           : pv.pending.reason === 'full'
-            ? 'The board will be full → it collapses into one universe and the game is scored.'
+            ? pv.q.isClassical
+              ? 'The board will be full → the game is scored.'
+              : 'The board will be full → it collapses into one universe and the game is scored.'
             : 'No square will be empty in every universe → the board collapses before the next turn.',
       );
       break;

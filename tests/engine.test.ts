@@ -4,6 +4,7 @@ import {
   newGame, defaultRules, applyMove, legalMoves, whyIllegal, replay, previewMove,
   rngForPly, seededRng, parseBoard, cellOf, X, O, EMPTY, conj, mul, add, c, abs2,
   type Complex, type Move, type GameState, forecast, correlations, lineOdds, NUM_CELLS,
+  allOutcomes, needsDice, noDice,
 } from '../src/engine/index.ts';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -241,6 +242,53 @@ describe('resolution rules', () => {
         expect(plies).toBeLessThanOrEqual(9 + 2 * s.rules.quanta);
       }
     }
+  });
+});
+
+describe('dice bookkeeping (used by the bot and by online play)', () => {
+  it('allOutcomes covers every random branch, needsDice knows when dice roll, previews match', () => {
+    const rng = seededRng('outcomes');
+    for (let game = 0; game < 120; game++) {
+      const level = (1 + (game % 3)) as 1 | 2 | 3;
+      let s = newGame(defaultRules(level));
+      while (!s.result) {
+        const moves = legalMoves(s);
+        const m = moves[Math.floor(rng() * moves.length)];
+        const branches = allOutcomes(s, m);
+        expect(branches.reduce((t, b) => t + b.p, 0)).toBeCloseTo(1, 9);
+        if (needsDice(s, m)) {
+          expect(() => applyMove(s, m, noDice)).toThrow();
+        } else {
+          // No dice: exactly one outcome, and the preview shows it.
+          expect(branches).toHaveLength(1);
+          const out = applyMove(s, m, noDice).state;
+          expect(out.q.hash()).toBe(branches[0].state.q.hash());
+          if (m.kind !== 'observe') expect(previewMove(s, m).q.hash()).toBe(out.q.hash());
+        }
+        s = applyMove(s, m, rng).state;
+      }
+    }
+  });
+
+  it('an Observe that settles the game is not reported as "no dice needed"', () => {
+    // Random games: whenever a move that rolled dice also ended the game, the
+    // result must not claim the outcome was certain.
+    const rng = seededRng('certain-flag');
+    let found = 0;
+    for (let game = 0; game < 400 && found < 5; game++) {
+      let s = newGame(defaultRules(2));
+      while (!s.result) {
+        const moves = legalMoves(s);
+        const m = moves[Math.floor(rng() * moves.length)];
+        const out = applyMove(s, m, rng);
+        if (out.state.result && out.events.some((e) => e.type === 'measure' || e.type === 'collapse')) {
+          expect(out.state.result.certain).toBe(false);
+          found++;
+        }
+        s = out.state;
+      }
+    }
+    expect(found).toBeGreaterThan(0);
   });
 });
 

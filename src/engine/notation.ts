@@ -59,6 +59,7 @@ export function resultSentence(r: GameResult): string {
   if (r.reason === 'abandon') return `${r.winner ? playerChar(r.winner) : '?'} wins — opponent left.`;
   const lines = r.xLines + r.oLines > 0 ? ` (lines X ${r.xLines} : ${r.oLines} O)` : '';
   if (r.winner === null) return `Draw${lines}.`;
-  const how = r.certain ? (r.code === null ? ' in every universe' : '') : ' after the collapse';
+  // code === null: several universes remain, all with the same winner.
+  const how = r.code === null ? ' in every universe' : r.certain ? '' : ' after the collapse';
   return `${playerChar(r.winner)} wins${how}${lines}.`;
 }

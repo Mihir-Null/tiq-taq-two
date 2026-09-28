@@ -109,6 +109,8 @@ export class GameController {
   readonly hintsLoading = signal(false);
   readonly hintsAllowed = signal(true);
   readonly undoAllowed = signal(false);
+  /** Shown instead of "Waiting for …" while it isn't the local player's turn (lessons use it). */
+  readonly note = signal<string | null>(null);
 
   #queue: Anim[] = [];
   #idleWaiters: (() => void)[] = [];
@@ -132,7 +134,11 @@ export class GameController {
 
   dispose(): void {
     this.#disposed = true;
+    clearTimeout(this.#flashTimer);
+    this.#queue = [];
     this.driver.dispose?.();
+    // Nobody will play the remaining animations: release anyone waiting for them.
+    this.#resolveIdle();
   }
 
   get disposed(): boolean {
@@ -176,6 +182,27 @@ export class GameController {
     const s = this.live.value;
     return !s.result && this.seats.value[s.toMove].local;
   });
+
+  /** Does anyone at this screen play in this game? (False for spectators.) */
+  readonly hasLocalPlayer = computed(() => {
+    const seats = this.seats.value;
+    return Object.values(seats).some((seat) => seat.local);
+  });
+
+  /**
+   * Index of the snapshot "Undo" would return to: the latest earlier position
+   * where a person at this screen is to move — or -1 if there is none (e.g.
+   * the bot has made only its opening move).
+   */
+  readonly undoTarget = computed(() => {
+    const list = this.snapshots.value;
+    for (let i = list.length - 2; i >= 0; i--) {
+      if (this.seats.value[list[i].state.toMove].kind === 'human') return i;
+    }
+    return -1;
+  });
+
+  readonly canUndo = computed(() => this.undoAllowed.value && this.undoTarget.value >= 0);
 
   /** May the local user act right now? */
   readonly canAct = computed(
@@ -249,6 +276,7 @@ export class GameController {
 
   #whyCantAct(): string {
     const s = this.live.value;
+    if (!this.hasLocalPlayer.value) return "You're watching this game.";
     if (s.result) return 'The game is over.';
     if (this.viewPly.value !== null) return "You're looking at the past — press “Live” to return.";
     if (this.anim.value) return 'Wait for the animation to finish.';
@@ -300,8 +328,9 @@ export class GameController {
     // Two-square tools: split, link, merge.
     if (sel.length === 0 || sel.length === 2) {
       if (sel.length === 2) {
-        if (i === sel[1] && t !== 'merge') return this.commit(this.twoSquare(t, sel[0], sel[1]));
-        if (i === sel[0] || i === sel[1]) {
+        // Tapping the second square again plays the move (a merge with the knob as set).
+        if (i === sel[1]) return this.commit(this.twoSquare(t, sel[0], sel[1]));
+        if (i === sel[0]) {
           this.selection.value = [];
           return;
         }
@@ -369,7 +398,11 @@ export class GameController {
 
   /** Show a suggested move on the board (as a selection with preview). */
   applyHint(h: Hint): void {
-    const m = h.move;
+    this.showMove(h.move);
+  }
+
+  /** Select the squares (and knob) of `m`, so its preview appears — nothing is played. */
+  showMove(m: Move): void {
     batch(() => {
       this.tool.value = m.kind;
       if (m.kind === 'place' || m.kind === 'observe') this.selection.value = [m.cell];
@@ -500,8 +533,10 @@ export class GameController {
 
 /**
  * Plays everything on this device: pass-and-play, the sandbox, and games
- * against the bot. Randomness comes from a per-game seed, so "undo and try
- * again" gives the same dice — no fishing for lucky collapses!
+ * against the bot. Randomness comes from a per-game seed and the move number,
+ * so undoing and replaying the SAME move gives the same dice — you can't
+ * re-roll a collapse you didn't like. (You can still use what you saw to pick
+ * a different move: undo is a practice tool, not a competitive one.)
  */
 export class LocalDriver implements Driver {
   readonly seed: string;
@@ -527,17 +562,15 @@ export class LocalDriver implements Driver {
   }
 
   undo(ctrl: GameController): void {
+    // Step back to the previous position where a person is to move. If there
+    // is none (the bot only made its opening move), there is nothing to undo —
+    // and the bot must not be interrupted either.
+    const target = ctrl.undoTarget.value;
+    if (target < 0) return;
     this.#epoch++;
     ctrl.thinking.value = false;
-    const snaps = ctrl.snapshots.value;
-    // Step back to the previous position where a local human is to move.
-    let n = 0;
-    for (let i = snaps.length - 1; i > 0; i--) {
-      n++;
-      const prev = snaps[i - 1].state;
-      if (ctrl.seats.value[prev.toMove].kind === 'human') break;
-    }
-    ctrl.truncate(n);
+    ctrl.truncate(ctrl.snapshots.value.length - 1 - target);
+    void this.#maybeBot(ctrl);
   }
 
   async #maybeBot(ctrl: GameController): Promise<void> {
