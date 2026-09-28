@@ -1,0 +1,41 @@
+{
+  // ────────────────────────────────────────────────────────────────────────
+  // TypeScript settings for the browser app (and the shared engine code).
+  //
+  // Vite does NOT use tsc to build: it strips types itself (very fast) and
+  // bundles. `tsc` is only run as a *type checker* (`npm run typecheck`,
+  // and as the first half of `npm run build`), hence `noEmit: true`.
+  // ────────────────────────────────────────────────────────────────────────
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    // "bundler" = resolve imports the way Vite does (package.json "exports", etc.)
+    "moduleResolution": "bundler",
+    // We write imports WITH their real extension: `import { x } from './qstate.ts'`.
+    // That makes the exact same files runnable by Node directly (Node >= 22.18
+    // strips types natively), which is how the lobby server reuses the engine.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    // JSX is compiled by Vite against Preact's runtime (h / Fragment).
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    // Every import that only brings in types must say `import type`. Node's
+    // type-stripper deletes those lines, so this keeps server code runnable.
+    "verbatimModuleSyntax": true,
+    // Forbid TS-only runtime features (enums, namespaces, parameter
+    // properties) — they cannot be "erased", so Node could not run them.
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "skipLibCheck": true,
+    "types": ["vite/client"]
+  },
+  "include": ["src", "tests"]
+}

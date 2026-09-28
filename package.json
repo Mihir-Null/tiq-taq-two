@@ -1,0 +1,47 @@
+{
+  "name": "tiq-taq-two",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Tiq Taq Two: quantum tic-tac-toe with superposition, entanglement and interference. Online lobbies, tutorials and visual inspection tools.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://mihir-null.github.io/tiq-taq-two/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mihir-Null/tiq-taq-two.git"
+  },
+  "bugs": "https://github.com/Mihir-Null/tiq-taq-two/issues",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
+    "build:single": "vite build --mode single",
+    "preview": "vite preview",
+    "server": "node server/main.ts",
+    "server:dev": "node --watch server/main.ts",
+    "start": "npm run build && npm run server",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.server.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@fontsource-variable/eb-garamond": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@preact/signals": "^2.11.2",
+    "peerjs": "^1.5.5",
+    "preact": "^10.29.8",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "@types/node": "^26.6.3",
+    "@types/ws": "^8.18.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^5.0.2"
+  }
+}

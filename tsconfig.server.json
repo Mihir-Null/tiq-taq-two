@@ -1,0 +1,11 @@
+{
+  // Type-checks the Node lobby server together with the shared (DOM-free)
+  // modules it imports. Node runs these .ts files directly (type stripping),
+  // so there is no build step for the server at all.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["server", "scripts"]
+}

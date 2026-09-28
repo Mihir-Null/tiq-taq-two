@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="lab">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="Tiq Taq Two — quantum tic-tac-toe with superposition, entanglement and interference. Play online, learn with interactive tutorials." />
+    <meta name="theme-color" content="#2c2e34" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232c2e34'/%3E%3Cg fill='none' stroke-linecap='round' stroke-width='6'%3E%3Cpath d='M14 14 L30 30 M30 14 L14 30' stroke='%2376cce0'/%3E%3Cpath d='M34 34 L50 50 M50 34 L34 50' stroke='%2376cce0' opacity='.45'/%3E%3Ccircle cx='44' cy='20' r='9' stroke='%23f39660'/%3E%3Ccircle cx='20' cy='44' r='9' stroke='%23f39660' opacity='.45'/%3E%3C/g%3E%3C/svg%3E" />
+    <title>Tiq Taq Two · quantum tic-tac-toe</title>
+    <script>
+      // Apply the saved theme before the first paint (avoids a flash of the wrong theme).
+      try {
+        var s = JSON.parse(localStorage.getItem('tq2.settings') || '{}');
+        var t = s.theme || 'auto';
+        if (t === 'auto') t = matchMedia('(prefers-color-scheme: light)').matches ? 'academia' : 'lab';
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>Tiq Taq Two needs JavaScript to run.</noscript>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,37 @@
+# systemd unit for the lobby server (non-NixOS hosts).
+#
+#   sudo cp deploy/tiq-taq-two.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tiq-taq-two
+#
+# Assumes the repo lives in /srv/tiq-taq-two and `npm ci && npm run build`
+# has been run there. Needs Node >= 22.18 (runs TypeScript directly).
+[Unit]
+Description=Tiq Taq Two lobby server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/tiq-taq-two
+ExecStart=/usr/bin/node server/main.ts
+Environment=PORT=8787
+Environment=HOST=127.0.0.1
+Environment=SERVER_NAME=Tiq Taq Two lobby
+# Behind a reverse proxy, trust X-Forwarded-For for per-IP limits:
+Environment=TRUST_PROXY=1
+# If the web app is hosted elsewhere (e.g. GitHub Pages), allow its origin:
+# Environment=ALLOWED_ORIGINS=https://you.github.io
+Restart=on-failure
+RestartSec=3
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
